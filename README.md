@@ -99,6 +99,9 @@ generate_husk_batch_script()
 ### 2. Standard / ROP (.bat Generator)
 Use this tool for traditional Houdini rendering (e.g. Redshift out of the `/out` context) via `hython` and `hrender.py`.
 
+> [!WARNING]
+> **Important Note for Solaris users using `hython`**: If you are using this `hython` script to render a **USD Render ROP**, you **MUST** ensure the `Render All Frames with a Single Process` checkbox is TICKED on your USD Render ROP. Otherwise, Houdini will spin up a separate `husk` process for every single frame, which is extremely slow. For Solaris, it is highly recommended to use the `husk` script above instead!
+
 ```python
 import hou
 import os
