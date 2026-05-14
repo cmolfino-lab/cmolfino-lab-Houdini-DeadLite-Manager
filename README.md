@@ -2,6 +2,8 @@
 
 **Houdini DeadLite Manager** is a highly lightweight, zero-installation, portable local render manager designed specifically for **SideFX Houdini** and **Solaris** workflows. 
 
+*(Note: This tool is currently Windows-only.)*
+
 It was built to solve a specific pain point: setting up official render managers like AWS Thinkbox Deadline or SideFX HQueue for a small home network or indie studio is often overkill. They require heavy database installations (like MongoDB), complex network configurations, and dedicated server software. 
 
 Houdini DeadLite Manager provides a fast, drag-and-drop solution for small 2-to-3 machine network rendering without any of the headache.
