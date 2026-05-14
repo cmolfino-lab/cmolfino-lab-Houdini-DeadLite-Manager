@@ -1,0 +1,19 @@
+# Environments
+venv/
+env/
+.env
+
+# Build and Dist
+build/
+dist/
+*.spec
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS generated files
+.DS_Store
+Thumbs.db

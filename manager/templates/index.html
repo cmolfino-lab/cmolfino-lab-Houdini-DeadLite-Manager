@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Houdini DeadLite Manager</title>
+    <style>
+        :root {
+            --bg-dark: #121212;
+            --bg-panel: #1e1e1e;
+            --bg-header: #2d2d30;
+            --border-color: #3e3e42;
+            --text-main: #d4d4d4;
+            --text-muted: #858585;
+            --accent-green: #4ade80;
+            --row-alt: #252526;
+            --row-hover: #2a2d2e;
+            --row-selected-deadline: #22c55e;
+        }
+
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Toolbar */
+        .toolbar {
+            display: flex;
+            background-color: var(--bg-header);
+            border-bottom: 1px solid var(--border-color);
+            padding: 4px 8px;
+            gap: 8px;
+            align-items: center;
+        }
+        
+        .toolbar-btn {
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--text-main);
+            padding: 6px 12px;
+            cursor: pointer;
+            border-radius: 3px;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .toolbar-btn:hover {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        .toolbar-btn:disabled {
+            color: var(--text-muted);
+            cursor: not-allowed;
+            background: transparent;
+            border: 1px solid transparent;
+            opacity: 0.5;
+        }
+        .toolbar-separator {
+            width: 1px;
+            height: 20px;
+            background-color: var(--border-color);
+            margin: 0 4px;
+        }
+
+        .title-branding {
+            margin-left: auto;
+            font-weight: bold;
+            color: var(--accent-green);
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Grid Layout */
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr 1fr;
+            flex: 1;
+            gap: 4px;
+            padding: 4px;
+            min-height: 0; /* needed for nested scrolling */
+        }
+
+        .panel {
+            background-color: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .panel.workers-panel {
+            grid-column: 1 / 3;
+            grid-row: 2 / 3;
+        }
+
+        .panel-header {
+            background-color: var(--bg-header);
+            padding: 4px 8px;
+            font-size: 12px;
+            font-weight: 600;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .panel-content {
+            flex: 1;
+            overflow: auto;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+            text-align: left;
+        }
+        
+        th, td {
+            padding: 4px 8px;
+            border-right: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--border-color);
+            white-space: nowrap;
+        }
+        
+        th {
+            background-color: var(--bg-header);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            font-weight: normal;
+            color: var(--text-muted);
+            box-shadow: 0 1px 0 var(--border-color);
+        }
+
+        tbody tr:nth-child(even) {
+            background-color: var(--row-alt);
+        }
+
+        tbody tr:hover {
+            background-color: var(--row-hover);
+            cursor: pointer;
+        }
+
+        tbody tr.selected {
+            background-color: var(--row-selected-deadline);
+            color: #000;
+        }
+
+        .status-queued { color: var(--text-main); }
+        .status-running { color: #60a5fa; }
+        .status-completed { color: var(--accent-green); }
+        .status-failed { color: #f87171; }
+        .status-paused { color: #fbbf24; }
+        .status-cancelled { color: #f87171; }
+
+        tr.selected .status-queued,
+        tr.selected .status-running,
+        tr.selected .status-completed,
+        tr.selected .status-failed,
+        tr.selected .status-paused,
+        tr.selected .status-cancelled {
+            color: #000;
+            font-weight: bold;
+        }
+
+        /* Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal {
+            background: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            width: 80%;
+            height: 80vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+        }
+        .modal-header {
+            padding: 8px 12px;
+            background: var(--bg-header);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+        }
+        .close-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 16px;
+            cursor: pointer;
+        }
+        .close-btn:hover { color: white; }
+        .modal-body {
+            flex: 1;
+            padding: 0;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        pre#log-content {
+            flex: 1;
+            margin: 0;
+            padding: 12px;
+            background: #000;
+            color: #a3e635; /* Terminal green */
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        /* Progress Bar CSS */
+        .progress-cell {
+            position: relative;
+            min-width: 80px;
+            padding: 0 !important; /* Remove padding so bar can fill cell */
+        }
+        .progress-bar-bg {
+            position: absolute;
+            top: 0; left: 0; bottom: 0; right: 0;
+            background-color: transparent;
+            z-index: 0;
+        }
+        .progress-bar-fill {
+            position: absolute;
+            top: 0; left: 0; bottom: 0;
+            background-color: rgba(46, 204, 113, 0.4);
+            z-index: 1;
+            transition: width 0.3s ease;
+        }
+        .progress-text {
+            position: relative;
+            z-index: 2;
+            padding: 4px 8px;
+            text-align: center;
+            font-weight: 600;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Hidden file input for submitting jobs -->
+    <input type="file" id="file-input" style="display: none;" accept=".bat">
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+        <button class="toolbar-btn" onclick="document.getElementById('file-input').click()">
+            Submit Job
+        </button>
+        <div class="toolbar-separator"></div>
+        <button class="toolbar-btn" id="btn-start" disabled onclick="jobAction('start')">Start</button>
+        <button class="toolbar-btn" id="btn-pause" disabled onclick="jobAction('pause')">Pause</button>
+        <button class="toolbar-btn" id="btn-cancel" disabled onclick="jobAction('cancel')">Cancel</button>
+        <button class="toolbar-btn" id="btn-delete" disabled onclick="jobAction('delete')">Delete</button>
+        <div class="toolbar-separator"></div>
+        <button class="toolbar-btn" id="btn-logs" disabled onclick="openSelectedTaskLog()">View Logs</button>
+        
+        <div class="title-branding">
+            Houdini DeadLite Manager
+        </div>
+    </div>
+
+    <!-- Main Grid -->
+    <div class="main-grid">
+        <!-- Jobs Panel -->
+        <div class="panel jobs-panel">
+            <div class="panel-header">
+                <span>Jobs</span>
+                <span id="jobs-count" style="color:var(--text-muted)">0 total</span>
+            </div>
+            <div class="panel-content">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Job Name</th>
+                            <th>Status</th>
+                            <th>Progress</th>
+                            <th>Time</th>
+                            <th>Submitted</th>
+                            <th>ID</th>
+                        </tr>
+                    </thead>
+                    <tbody id="jobs-tbody">
+                        <!-- Populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Tasks Panel -->
+        <div class="panel tasks-panel">
+            <div class="panel-header">
+                <span>Tasks</span>
+                <span id="tasks-count" style="color:var(--text-muted)">0 total</span>
+            </div>
+            <div class="panel-content">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Task ID</th>
+                            <th>Frame</th>
+                            <th>Status</th>
+                            <th>Progress</th>
+                            <th>Time</th>
+                            <th>Worker</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tasks-tbody">
+                        <!-- Populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Workers Panel -->
+        <div class="panel workers-panel">
+            <div class="panel-header">
+                <span>Workers</span>
+                <span id="workers-count" style="color:var(--text-muted)">0 total</span>
+            </div>
+            <div class="panel-content">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Worker Name</th>
+                            <th>Status</th>
+                            <th>Last Update</th>
+                        </tr>
+                    </thead>
+                    <tbody id="workers-tbody">
+                        <!-- Populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Log Modal -->
+    <div class="modal-overlay" id="log-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <span id="log-modal-title">Task Logs</span>
+                <button class="close-btn" onclick="closeLogModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <pre id="log-content">Loading...</pre>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let globalState = { tasks: {}, jobs: {}, workers: {} };
+        let selectedJobId = null;
+        let selectedTaskId = null;
+        let activeLogTaskId = null;
+
+        // --- File Upload Logic ---
+        document.getElementById('file-input').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const res = await fetch('/api/jobs/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                if (res.ok) {
+                    // Reset input
+                    e.target.value = '';
+                    fetchState();
+                } else {
+                    alert('Upload failed');
+                }
+            } catch (err) {
+                console.error(err);
+                alert('Upload error');
+            }
+        });
+
+        // --- Polling & Rendering Logic ---
+        async function fetchState() {
+            try {
+                const res = await fetch('/api/state');
+                globalState = await res.json();
+                renderState();
+
+                // If a job is selected but it was deleted (e.g. from another tab or just now), clear selection
+                if (selectedJobId && !globalState.jobs[selectedJobId]) {
+                    selectedJobId = null;
+                    selectedTaskId = null;
+                    updateToolbar();
+                }
+
+                // If modal is open, update logs
+                if (activeLogTaskId && globalState.tasks[activeLogTaskId]) {
+                    const logContent = document.getElementById('log-content');
+                    const isNearBottom = logContent.scrollHeight - logContent.scrollTop <= logContent.clientHeight + 50;
+                    logContent.textContent = globalState.tasks[activeLogTaskId].logs || "No logs available yet.";
+                    if (isNearBottom) {
+                        logContent.scrollTop = logContent.scrollHeight;
+                    }
+                }
+            } catch (err) {
+                console.error("Failed to fetch state:", err);
+            }
+        }
+
+        function formatTime(timestamp) {
+            if (!timestamp) return '-';
+            const d = new Date(timestamp * 1000);
+            return d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+        }
+
+        function formatDurationSecs(diffSecs) {
+            if (diffSecs <= 0) return '-';
+            const h = Math.floor(diffSecs / 3600);
+            const m = Math.floor((diffSecs % 3600) / 60);
+            const s = Math.floor(diffSecs % 60);
+            if (h > 0) return `${h}h ${m}m ${s}s`;
+            if (m > 0) return `${m}m ${s}s`;
+            return `${s}s`;
+        }
+
+        function getProgressBarHtml(progressPercent) {
+            const p = Math.max(0, Math.min(100, progressPercent || 0));
+            return `
+                <div class="progress-cell">
+                    <div class="progress-bar-bg"></div>
+                    <div class="progress-bar-fill" style="width: ${p}%;"></div>
+                    <span class="progress-text">${p}%</span>
+                </div>
+            `;
+        }
+
+        function renderState() {
+            // Render Jobs
+            const jobsTbody = document.getElementById('jobs-tbody');
+            const jobs = Object.values(globalState.jobs).sort((a, b) => b.created_at - a.created_at);
+            document.getElementById('jobs-count').innerText = `${jobs.length} total`;
+            
+            let jobsHtml = '';
+            for (const job of jobs) {
+                const isSelected = job.id === selectedJobId ? 'selected' : '';
+                
+                // Calculate job progress and total time
+                let jobTasks = Object.values(globalState.tasks).filter(t => t.job_id === job.id);
+                let totalProgress = 0;
+                let jobTime = 0;
+                for (const t of jobTasks) {
+                    totalProgress += (t.progress || 0);
+                    if (t.start_time) {
+                        const end = t.end_time || (Date.now() / 1000);
+                        jobTime += Math.max(0, end - t.start_time);
+                    }
+                }
+                const avgProgress = jobTasks.length ? Math.floor(totalProgress / jobTasks.length) : 0;
+                const jobDurationStr = jobTime > 0 ? formatDurationSecs(jobTime) : '-';
+
+                jobsHtml += `
+                    <tr class="${isSelected}" onclick="selectJob('${job.id}')">
+                        <td>${job.name}</td>
+                        <td class="status-${job.status}">${job.status}</td>
+                        <td>${getProgressBarHtml(avgProgress)}</td>
+                        <td>${jobDurationStr}</td>
+                        <td>${formatTime(job.created_at)}</td>
+                        <td>${job.id.substring(0, 8)}</td>
+                    </tr>
+                `;
+            }
+            jobsTbody.innerHTML = jobsHtml;
+
+            // Render Tasks (for selected job)
+            const tasksTbody = document.getElementById('tasks-tbody');
+            if (selectedJobId && globalState.jobs[selectedJobId]) {
+                const tasks = Object.values(globalState.tasks)
+                    .filter(t => t.job_id === selectedJobId)
+                    .sort((a, b) => {
+                        // try to sort by frame number if possible
+                        let aMatch = a.command.match(/-f\s+([0-9.]+)/);
+                        let bMatch = b.command.match(/-f\s+([0-9.]+)/);
+                        if (aMatch && bMatch) return parseFloat(aMatch[1]) - parseFloat(bMatch[1]);
+                        return a.id.localeCompare(b.id);
+                    });
+                
+                document.getElementById('tasks-count').innerText = `${tasks.length} total`;
+                
+                let tasksHtml = '';
+                for (let i=0; i<tasks.length; i++) {
+                    const t = tasks[i];
+                    const isSelected = t.id === selectedTaskId ? 'selected' : '';
+                    let fMatch = t.command.match(/-f\s+([0-9.]+)\s+([0-9.]+)/) || t.command.match(/-f\s+([0-9.]+)\s+-n\s+([0-9.]+)/);
+                    let frames = 'N/A';
+                    if (fMatch) {
+                        // handle both format variations from previous iterations
+                        if (t.command.includes('-n')) {
+                            const start = parseFloat(fMatch[1]);
+                            const num = parseFloat(fMatch[2]);
+                            frames = `${start}-${start + num - 1}`;
+                        } else {
+                            frames = `${fMatch[1]}-${fMatch[2]}`;
+                        }
+                    }
+                    
+                    let taskTime = 0;
+                    if (t.start_time) {
+                        const end = t.end_time || (Date.now() / 1000);
+                        taskTime = Math.max(0, end - t.start_time);
+                    }
+                    const taskDurationStr = taskTime > 0 ? formatDurationSecs(taskTime) : '-';
+
+                    tasksHtml += `
+                        <tr class="${isSelected}" onclick="selectTask('${t.id}')" ondblclick="openLogModal('${t.id}', '${frames}')">
+                            <td>${i}</td>
+                            <td>${frames}</td>
+                            <td class="status-${t.status}">${t.status}</td>
+                            <td>${getProgressBarHtml(t.progress || 0)}</td>
+                            <td>${taskDurationStr}</td>
+                            <td>${t.worker_id || '-'}</td>
+                        </tr>
+                    `;
+                }
+                tasksTbody.innerHTML = tasksHtml;
+            } else {
+                tasksTbody.innerHTML = '';
+                document.getElementById('tasks-count').innerText = `0 total`;
+            }
+
+            // Render Workers
+            const workersTbody = document.getElementById('workers-tbody');
+            const workers = Object.values(globalState.workers);
+            document.getElementById('workers-count').innerText = `${workers.length} total`;
+            
+            let workersHtml = '';
+            for (const w of workers) {
+                // Determine if online (seen within 30s)
+                const isOnline = (Date.now()/1000 - w.last_seen) < 30;
+                const status = isOnline ? (w.current_task_id ? 'Rendering' : 'Idle') : 'Offline';
+                const statusColor = isOnline ? (w.current_task_id ? 'status-running' : 'status-completed') : 'status-failed';
+                
+                workersHtml += `
+                    <tr>
+                        <td>${w.id}</td>
+                        <td class="${statusColor}">${status}</td>
+                        <td>${formatTime(w.last_seen)}</td>
+                    </tr>
+                `;
+            }
+            workersTbody.innerHTML = workersHtml;
+
+            updateToolbar();
+        }
+
+        function selectJob(jobId) {
+            selectedJobId = jobId;
+            selectedTaskId = null; // reset task selection
+            renderState();
+        }
+
+        function selectTask(taskId) {
+            selectedTaskId = taskId;
+            renderState();
+        }
+
+        function updateToolbar() {
+            const btnStart = document.getElementById('btn-start');
+            const btnPause = document.getElementById('btn-pause');
+            const btnCancel = document.getElementById('btn-cancel');
+            const btnDelete = document.getElementById('btn-delete');
+            const btnLogs = document.getElementById('btn-logs');
+
+            // Reset all to disabled
+            btnStart.disabled = true;
+            btnPause.disabled = true;
+            btnCancel.disabled = true;
+            btnDelete.disabled = true;
+            btnLogs.disabled = true;
+
+            if (selectedTaskId && globalState.tasks[selectedTaskId]) {
+                // Task is selected, toolbar actions apply to the task
+                const task = globalState.tasks[selectedTaskId];
+                btnLogs.disabled = false;
+                
+                if (['paused', 'failed', 'cancelled'].includes(task.status)) {
+                    btnStart.disabled = false;
+                }
+                if (['queued'].includes(task.status)) {
+                    btnPause.disabled = false;
+                }
+                if (['queued', 'running', 'paused'].includes(task.status)) {
+                    btnCancel.disabled = false;
+                }
+            } else if (selectedJobId && globalState.jobs[selectedJobId]) {
+                // Job is selected, toolbar actions apply to the job
+                const job = globalState.jobs[selectedJobId];
+                btnDelete.disabled = false;
+                
+                if (['paused', 'failed', 'cancelled', 'completed'].includes(job.status)) {
+                    btnStart.disabled = false;
+                }
+                if (['queued', 'running', 'failed'].includes(job.status)) {
+                    btnPause.disabled = false;
+                }
+                if (['queued', 'running', 'paused', 'failed'].includes(job.status)) {
+                    btnCancel.disabled = false;
+                }
+            }
+        }
+
+        async function jobAction(action) {
+            let targetId = null;
+            let targetType = null;
+            
+            if (selectedTaskId) {
+                targetId = selectedTaskId;
+                targetType = 'tasks';
+            } else if (selectedJobId) {
+                targetId = selectedJobId;
+                targetType = 'jobs';
+            } else {
+                return;
+            }
+            
+            if (action === 'delete') {
+                if (targetType === 'tasks') return; // Cannot delete tasks individually
+                if (!confirm('Are you sure you want to permanently delete this job?')) return;
+            }
+            if (action === 'cancel') {
+                if (!confirm(`Are you sure you want to cancel this ${targetType === 'tasks' ? 'task' : 'job'}?`)) return;
+            }
+
+            try {
+                await fetch(`/api/${targetType}/${targetId}/${action}`, { method: action === 'delete' ? 'DELETE' : 'POST' });
+                if (action === 'delete') {
+                    selectedJobId = null;
+                    selectedTaskId = null;
+                }
+                fetchState();
+            } catch (err) {
+                console.error(err);
+                alert(`Failed to ${action} ${targetType}`);
+            }
+        }
+
+        // Modal functions
+        function openLogModal(taskId, title) {
+            activeLogTaskId = taskId;
+            document.getElementById('log-modal-title').innerText = 'Logs - ' + title;
+            document.getElementById('log-modal').style.display = 'flex';
+            const logContent = document.getElementById('log-content');
+            logContent.textContent = globalState.tasks[taskId]?.logs || "Loading...";
+            logContent.scrollTop = logContent.scrollHeight;
+        }
+        
+        function openSelectedTaskLog() {
+            if (!selectedTaskId) return;
+            const t = globalState.tasks[selectedTaskId];
+            let fMatch = t.command.match(/-f\s+([0-9.]+)\s+([0-9.]+)/);
+            let frames = fMatch ? `${fMatch[1]}-${fMatch[2]}` : 'N/A';
+            openLogModal(selectedTaskId, frames);
+        }
+
+        function closeLogModal() {
+            activeLogTaskId = null;
+            document.getElementById('log-modal').style.display = 'none';
+        }
+
+        // Close modal on outside click
+        window.onclick = function(event) {
+            const modal = document.getElementById('log-modal');
+            if (event.target == modal) {
+                closeLogModal();
+            }
+        }
+
+        // Start polling every 2 seconds
+        setInterval(fetchState, 2000);
+        fetchState();
+    </script>
+</body>
+</html>
