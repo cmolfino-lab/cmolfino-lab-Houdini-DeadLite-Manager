@@ -8,6 +8,10 @@ It was built to solve a specific pain point: setting up official render managers
 
 Houdini DeadLite Manager provides a fast, drag-and-drop solution for small 2-to-3 machine network rendering without any of the headache.
 
+## Download
+You can download the latest pre-compiled, portable executables for Windows from the **[GitHub Releases](https://github.com/cmolfino-lab/cmolfino-lab-Houdini-DeadLite-Manager/releases)** page.
+
+
 ## Features
 * **Zero-Installation:** Runs entirely from portable `.exe` files. No databases, no background services, no complex setup.
 * **Houdini & Solaris Native:** Specifically designed to parse `.bat` files generated from Houdini containing `hython`, `hrender`, or `husk` commands.
@@ -24,10 +28,11 @@ Houdini DeadLite Manager uses a simple Manager/Worker architecture over standard
 
 ## Usage
 
-1. Launch `deadlite_manager.exe` on your main computer.
-2. Launch `deadlite_worker.exe` on any machines you want to use for rendering. (Make sure their `config.json` points to the Manager's IP address).
-3. Open `http://localhost:5000` in your web browser.
-4. Drag and drop a Houdini `.bat` file onto the dashboard to submit the job!
+1. **Download** the latest `deadlite_manager.exe` and `deadlite_worker.exe` from the [Releases](https://github.com/cmolfino-lab/cmolfino-lab-Houdini-DeadLite-Manager/releases) page.
+2. **Launch `deadlite_manager.exe`** on your main workstation.
+3. **Launch `deadlite_worker.exe`** on any machines you want to use for rendering. (Ensure their `config.json` points to the Manager's IP address).
+4. **Open the Dashboard**: Navigate to `http://localhost:5000` in your web browser.
+5. **Submit a Job**: Drag and drop a Houdini `.bat` file (see below) onto the dashboard to start rendering!
 
 ## Generating .bat Files (Houdini Shelf Tools)
 
