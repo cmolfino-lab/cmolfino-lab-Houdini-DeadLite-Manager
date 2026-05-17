@@ -8,12 +8,16 @@ It was built to solve a specific pain point: setting up official render managers
 
 Houdini DeadLite Manager provides a fast, drag-and-drop solution for small 2-to-3 machine network rendering without any of the headache.
 
+![Houdini DeadLite Manager Dashboard](screenshot.png)
+
 ## Download
 You can download the latest pre-compiled, portable executables for Windows from the **[GitHub Releases](https://github.com/cmolfino-lab/cmolfino-lab-Houdini-DeadLite-Manager/releases)** page.
 
 
 ## Features
 * **Zero-Installation:** Runs entirely from portable `.exe` files. No databases, no background services, no complex setup.
+* **Visual Queue Prioritization:** Instantly adjust rendering priority by moving jobs up or down physically using **▲ Move Up** and **▼ Move Down** buttons on the dashboard.
+* **Queue-Aware Dispatching:** Connected worker nodes automatically respect your queue order, concentrating resources on the highest-priority job at the top of the queue first before cascading to the next.
 * **Houdini & Solaris Native:** Specifically designed to parse `.bat` files generated from Houdini containing `hython`, `hrender`, or `husk` commands.
 * **Multi-Engine Support:** Works out-of-the-box with **Karma CPU**, **Karma XPU**, and **Redshift**.
 * **Real-time Progress Tracking:** Intercepts `ALF_PROGRESS` statements natively from Houdini's command-line tools to provide live, dynamic progress bars in the UI.

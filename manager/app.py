@@ -9,7 +9,8 @@ app = Flask(__name__)
 STATE = {
     "jobs": {},     # job_id -> {id, name, status, created_at}
     "tasks": {},    # task_id -> {id, job_id, command, cwd, status, worker_id, logs, start_time, end_time}
-    "workers": {}   # worker_id -> {id, status, last_seen, current_task_id}
+    "workers": {},  # worker_id -> {id, status, last_seen, current_task_id}
+    "job_order": [] # List of job_ids in queue order
 }
 
 @app.route('/')
@@ -43,6 +44,14 @@ def get_state():
         else:
             job["status"] = "queued"
             
+    # Ensure job_order is in sync with existing jobs
+    if "job_order" not in STATE:
+        STATE["job_order"] = []
+    for job_id in STATE["jobs"]:
+        if job_id not in STATE["job_order"]:
+            STATE["job_order"].append(job_id)
+    STATE["job_order"] = [jid for jid in STATE["job_order"] if jid in STATE["jobs"]]
+            
     return jsonify(STATE)
 
 @app.route('/api/jobs', methods=['POST'])
@@ -58,6 +67,10 @@ def submit_job():
         "status": "queued",
         "created_at": time.time()
     }
+    
+    if "job_order" not in STATE:
+        STATE["job_order"] = []
+    STATE["job_order"].append(job_id)
     
     for t_data in tasks_data:
         task_id = str(uuid.uuid4())
@@ -136,6 +149,10 @@ def delete_job(job_id):
     if job_id in STATE["jobs"]:
         del STATE["jobs"][job_id]
         
+        # Delete from job_order
+        if "job_order" in STATE and job_id in STATE["job_order"]:
+            STATE["job_order"].remove(job_id)
+            
         # Delete associated tasks
         tasks_to_delete = [t_id for t_id, t in STATE["tasks"].items() if t["job_id"] == job_id]
         for t_id in tasks_to_delete:
@@ -197,6 +214,10 @@ def upload_job():
             "created_at": time.time()
         }
         
+        if "job_order" not in STATE:
+            STATE["job_order"] = []
+        STATE["job_order"].append(job_id)
+        
         for t_data in tasks_data:
             task_id = str(uuid.uuid4())
             STATE["tasks"][task_id] = {
@@ -215,6 +236,38 @@ def upload_job():
         return jsonify({"status": "ok", "job_id": job_id})
         
     return jsonify({"error": "Invalid file type"}), 400
+
+@app.route('/api/jobs/<job_id>/move', methods=['POST'])
+def move_job(job_id):
+    if job_id not in STATE["jobs"]:
+        return jsonify({"error": "Job not found"}), 404
+        
+    data = request.json or {}
+    direction = data.get("direction")
+    if direction not in ["up", "down"]:
+        return jsonify({"error": "Invalid direction"}), 400
+        
+    # Ensure job_order is in sync
+    if "job_order" not in STATE:
+        STATE["job_order"] = []
+    for jid in STATE["jobs"]:
+        if jid not in STATE["job_order"]:
+            STATE["job_order"].append(jid)
+    STATE["job_order"] = [jid for jid in STATE["job_order"] if jid in STATE["jobs"]]
+    
+    try:
+        idx = STATE["job_order"].index(job_id)
+    except ValueError:
+        return jsonify({"error": "Job not in order list"}), 400
+        
+    if direction == "up" and idx > 0:
+        # Swap with previous
+        STATE["job_order"][idx], STATE["job_order"][idx-1] = STATE["job_order"][idx-1], STATE["job_order"][idx]
+    elif direction == "down" and idx < len(STATE["job_order"]) - 1:
+        # Swap with next
+        STATE["job_order"][idx], STATE["job_order"][idx+1] = STATE["job_order"][idx+1], STATE["job_order"][idx]
+        
+    return jsonify({"status": "ok", "job_order": STATE["job_order"]})
 
 @app.route('/api/worker/poll', methods=['POST'])
 def worker_poll():
@@ -235,18 +288,40 @@ def worker_poll():
     if worker["status"] == "running" and worker["current_task_id"]:
         return jsonify({"status": "wait", "message": "already running a task"})
         
-    # Find next queued task
-    for task_id, task in STATE["tasks"].items():
-        if task["status"] == "queued":
-            # Assign task
-            task["status"] = "running"
-            task["worker_id"] = worker_id
-            task["start_time"] = time.time()
-            
-            worker["status"] = "running"
-            worker["current_task_id"] = task_id
-            
-            return jsonify({"status": "task", "task": task})
+    # Find next queued task in order of job priority (job_order)
+    # job_order[0] is the highest priority job
+    if "job_order" not in STATE:
+        STATE["job_order"] = []
+    for job_id in STATE["job_order"]:
+        job = STATE["jobs"].get(job_id)
+        if job and job["status"] not in ["paused", "cancelled"]:
+            # Find queued tasks for this job
+            job_tasks = [t for t in STATE["tasks"].values() if t["job_id"] == job_id and t["status"] == "queued"]
+            if job_tasks:
+                # Sort tasks by frame number
+                def get_frame(task):
+                    import re
+                    match = re.search(r'-f\s+([0-9.]+)', task.get("command", ""))
+                    if match:
+                        try:
+                            return float(match.group(1))
+                        except ValueError:
+                            pass
+                    return 0.0
+                job_tasks.sort(key=get_frame)
+                
+                task = job_tasks[0]
+                task_id = task["id"]
+                
+                # Assign task
+                task["status"] = "running"
+                task["worker_id"] = worker_id
+                task["start_time"] = time.time()
+                
+                worker["status"] = "running"
+                worker["current_task_id"] = task_id
+                
+                return jsonify({"status": "task", "task": task})
             
     worker["status"] = "idle"
     worker["current_task_id"] = None

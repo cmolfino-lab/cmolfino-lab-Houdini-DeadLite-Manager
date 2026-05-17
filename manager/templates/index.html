@@ -275,6 +275,9 @@
         <button class="toolbar-btn" id="btn-cancel" disabled onclick="jobAction('cancel')">Cancel</button>
         <button class="toolbar-btn" id="btn-delete" disabled onclick="jobAction('delete')">Delete</button>
         <div class="toolbar-separator"></div>
+        <button class="toolbar-btn" id="btn-move-up" disabled onclick="moveJob('up')">▲ Move Up</button>
+        <button class="toolbar-btn" id="btn-move-down" disabled onclick="moveJob('down')">▼ Move Down</button>
+        <div class="toolbar-separator"></div>
         <button class="toolbar-btn" id="btn-logs" disabled onclick="openSelectedTaskLog()">View Logs</button>
         
         <div class="title-branding">
@@ -294,6 +297,7 @@
                 <table>
                     <thead>
                         <tr>
+                            <th style="width: 50px; text-align: center;">Pos</th>
                             <th>Job Name</th>
                             <th>Status</th>
                             <th>Progress</th>
@@ -458,13 +462,28 @@
         }
 
         function renderState() {
-            // Render Jobs
+            // Render Jobs in queue order
             const jobsTbody = document.getElementById('jobs-tbody');
-            const jobs = Object.values(globalState.jobs).sort((a, b) => b.created_at - a.created_at);
+            const jobs = [];
+            if (globalState.job_order) {
+                for (const job_id of globalState.job_order) {
+                    if (globalState.jobs[job_id]) {
+                        jobs.push(globalState.jobs[job_id]);
+                    }
+                }
+            }
+            // Fallback for any jobs not listed in job_order
+            for (const job of Object.values(globalState.jobs)) {
+                if (!jobs.find(j => j.id === job.id)) {
+                    jobs.push(job);
+                }
+            }
+            
             document.getElementById('jobs-count').innerText = `${jobs.length} total`;
             
             let jobsHtml = '';
-            for (const job of jobs) {
+            for (let i = 0; i < jobs.length; i++) {
+                const job = jobs[i];
                 const isSelected = job.id === selectedJobId ? 'selected' : '';
                 
                 // Calculate job progress and total time
@@ -483,6 +502,7 @@
 
                 jobsHtml += `
                     <tr class="${isSelected}" onclick="selectJob('${job.id}')">
+                        <td style="text-align: center; font-weight: bold; color: var(--accent-green);">#${i + 1}</td>
                         <td>${job.name}</td>
                         <td class="status-${job.status}">${job.status}</td>
                         <td>${getProgressBarHtml(avgProgress)}</td>
@@ -591,6 +611,8 @@
             const btnPause = document.getElementById('btn-pause');
             const btnCancel = document.getElementById('btn-cancel');
             const btnDelete = document.getElementById('btn-delete');
+            const btnMoveUp = document.getElementById('btn-move-up');
+            const btnMoveDown = document.getElementById('btn-move-down');
             const btnLogs = document.getElementById('btn-logs');
 
             // Reset all to disabled
@@ -598,6 +620,8 @@
             btnPause.disabled = true;
             btnCancel.disabled = true;
             btnDelete.disabled = true;
+            btnMoveUp.disabled = true;
+            btnMoveDown.disabled = true;
             btnLogs.disabled = true;
 
             if (selectedTaskId && globalState.tasks[selectedTaskId]) {
@@ -627,6 +651,16 @@
                 }
                 if (['queued', 'running', 'paused', 'failed'].includes(job.status)) {
                     btnCancel.disabled = false;
+                }
+                
+                // Enable Up/Down queue buttons
+                const jobOrder = globalState.job_order || [];
+                const idx = jobOrder.indexOf(selectedJobId);
+                if (idx > 0) {
+                    btnMoveUp.disabled = false;
+                }
+                if (idx !== -1 && idx < jobOrder.length - 1) {
+                    btnMoveDown.disabled = false;
                 }
             }
         }
@@ -663,6 +697,26 @@
             } catch (err) {
                 console.error(err);
                 alert(`Failed to ${action} ${targetType}`);
+            }
+        }
+
+        async function moveJob(direction) {
+            if (!selectedJobId) return;
+            try {
+                const res = await fetch(`/api/jobs/${selectedJobId}/move`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ direction: direction })
+                });
+                if (res.ok) {
+                    fetchState();
+                } else {
+                    const err = await res.json();
+                    alert(`Failed to move job: ${err.error || 'Unknown error'}`);
+                }
+            } catch (err) {
+                console.error(err);
+                alert("Error moving job.");
             }
         }
 
