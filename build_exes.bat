@@ -1,6 +1,6 @@
 @echo off
 echo Building Deadlite Worker...
-call .\venv\Scripts\python.exe -m PyInstaller --onefile --noconfirm worker\client.py -n deadlite_worker
+call .\venv\Scripts\python.exe -m PyInstaller --onefile --noconfirm --add-data "worker/hython_runner.py;." worker\client.py -n deadlite_worker
 
 echo.
 echo Building Deadlite Manager...

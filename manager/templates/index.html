@@ -51,6 +51,7 @@
             display: flex;
             align-items: center;
             gap: 6px;
+            white-space: nowrap;
         }
         .toolbar-btn:hover {
             background: rgba(255,255,255,0.1);
@@ -78,6 +79,10 @@
             display: flex;
             align-items: center;
             gap: 8px;
+            /* On a narrow window the title gives way, the buttons stay on one line */
+            white-space: nowrap;
+            min-width: 0;
+            overflow: hidden;
         }
 
         /* Grid Layout */
@@ -279,6 +284,7 @@
         <button class="toolbar-btn" id="btn-move-down" disabled onclick="moveJob('down')">▼ Move Down</button>
         <div class="toolbar-separator"></div>
         <button class="toolbar-btn" id="btn-logs" disabled onclick="openSelectedTaskLog()">View Logs</button>
+        <button class="toolbar-btn" id="btn-output" disabled onclick="openOutput()">Open Output</button>
         
         <div class="title-branding">
             Houdini DeadLite Manager
@@ -500,11 +506,19 @@
                 const avgProgress = jobTasks.length ? Math.floor(totalProgress / jobTasks.length) : 0;
                 const jobDurationStr = jobTime > 0 ? formatDurationSecs(jobTime) : '-';
 
+                // A job keeps rendering its other tasks after one fails, so show failures next to the status
+                const failedCount = jobTasks.filter(t => t.status === 'failed').length;
+                const failedNote = (failedCount && job.status !== 'failed') ? ` <span class="status-failed">(${failedCount} failed)</span>` : '';
+                const warningCount = jobTasks.filter(t => t.warning).length;
+                const warningNote = warningCount ? ` <span class="status-paused">(${warningCount} with warnings)</span>` : '';
+                // Queued with no machine able to take it: say what it is waiting for
+                const waitingNote = job.waiting_for ? ` <span class="status-paused">- waiting for ${job.waiting_for}</span>` : '';
+
                 jobsHtml += `
                     <tr class="${isSelected}" onclick="selectJob('${job.id}')">
                         <td style="text-align: center; font-weight: bold; color: var(--accent-green);">#${i + 1}</td>
                         <td>${job.name}</td>
-                        <td class="status-${job.status}">${job.status}</td>
+                        <td class="status-${job.status}">${job.status}${failedNote}${warningNote}${waitingNote}</td>
                         <td>${getProgressBarHtml(avgProgress)}</td>
                         <td>${jobDurationStr}</td>
                         <td>${formatTime(job.created_at)}</td>
@@ -519,33 +533,22 @@
             if (selectedJobId && globalState.jobs[selectedJobId]) {
                 const tasks = Object.values(globalState.tasks)
                     .filter(t => t.job_id === selectedJobId)
-                    .sort((a, b) => {
-                        // try to sort by frame number if possible
-                        let aMatch = a.command.match(/-f\s+([0-9.]+)/);
-                        let bMatch = b.command.match(/-f\s+([0-9.]+)/);
-                        if (aMatch && bMatch) return parseFloat(aMatch[1]) - parseFloat(bMatch[1]);
-                        return a.id.localeCompare(b.id);
-                    });
+                    .sort((a, b) => a.index - b.index); // same order as the submitted file, which is the order they are handed out
                 
-                document.getElementById('tasks-count').innerText = `${tasks.length} total`;
-                
+                // For a job from Houdini, say how it renders next to the count
+                const job = globalState.jobs[selectedJobId];
+                const jobInfo = job.type ? `${job.type} · Houdini ${job.houdini} · ` : '';
+                document.getElementById('tasks-count').innerText = `${jobInfo}${tasks.length} total`;
+
                 let tasksHtml = '';
                 for (let i=0; i<tasks.length; i++) {
                     const t = tasks[i];
                     const isSelected = t.id === selectedTaskId ? 'selected' : '';
-                    let fMatch = t.command.match(/-f\s+([0-9.]+)\s+([0-9.]+)/) || t.command.match(/-f\s+([0-9.]+)\s+-n\s+([0-9.]+)/);
-                    let frames = 'N/A';
-                    if (fMatch) {
-                        // handle both format variations from previous iterations
-                        if (t.command.includes('-n')) {
-                            const start = parseFloat(fMatch[1]);
-                            const num = parseFloat(fMatch[2]);
-                            frames = `${start}-${start + num - 1}`;
-                        } else {
-                            frames = `${fMatch[1]}-${fMatch[2]}`;
-                        }
-                    }
-                    
+                    const frames = taskFrames(t);
+                    // Frames already on disk are skipped if the task is started again
+                    const doneCount = (t.done_frames || []).length;
+                    const doneNote = (doneCount && t.status !== 'completed') ? ` (${doneCount}/${t.frames.length} done)` : '';
+
                     let taskTime = 0;
                     if (t.start_time) {
                         const end = t.end_time || (Date.now() / 1000);
@@ -556,8 +559,8 @@
                     tasksHtml += `
                         <tr class="${isSelected}" onclick="selectTask('${t.id}')" ondblclick="openLogModal('${t.id}', '${frames}')">
                             <td>${i}</td>
-                            <td>${frames}</td>
-                            <td class="status-${t.status}">${t.status}</td>
+                            <td>${frames}${doneNote}</td>
+                            <td class="status-${t.status}">${t.status}${t.attempt > 1 ? ` (try ${t.attempt})` : ''}${t.warning ? ` <span class="status-paused">- ${t.warning}</span>` : ''}</td>
                             <td>${getProgressBarHtml(t.progress || 0)}</td>
                             <td>${taskDurationStr}</td>
                             <td>${t.worker_id || '-'}</td>
@@ -577,11 +580,20 @@
             
             let workersHtml = '';
             for (const w of workers) {
-                // Determine if online (seen within 30s)
-                const isOnline = (Date.now()/1000 - w.last_seen) < 30;
-                const status = isOnline ? (w.current_task_id ? 'Rendering' : 'Idle') : 'Offline';
-                const statusColor = isOnline ? (w.current_task_id ? 'status-running' : 'status-completed') : 'status-failed';
-                
+                // The manager decides who is online, so this does not depend on the browser's clock
+                let status = 'Idle';
+                let statusColor = 'status-completed';
+                if (w.status === 'offline') {
+                    status = 'Offline';
+                    statusColor = 'status-failed';
+                } else if (w.outdated) {
+                    status = 'Outdated - update this worker to the same version as the manager';
+                    statusColor = 'status-paused';
+                } else if (w.status === 'running') {
+                    status = 'Rendering';
+                    statusColor = 'status-running';
+                }
+
                 workersHtml += `
                     <tr>
                         <td>${w.id}</td>
@@ -593,6 +605,24 @@
             workersTbody.innerHTML = workersHtml;
 
             updateToolbar();
+        }
+
+        // Frames a task covers. A job from Houdini carries them; for a .bat they are read from the command.
+        function taskFrames(t) {
+            if (t.frames && t.frames.length) {
+                const first = t.frames[0];
+                const last = t.frames[t.frames.length - 1];
+                return first === last ? `${first}` : `${first}-${last}`;
+            }
+            let fMatch = t.command.match(/-f\s+([0-9.]+)\s+([0-9.]+)/) || t.command.match(/-f\s+([0-9.]+)\s+-n\s+([0-9.]+)/);
+            if (!fMatch) return 'N/A';
+            // handle both format variations from previous iterations
+            if (t.command.includes('-n')) {
+                const start = parseFloat(fMatch[1]);
+                const num = parseFloat(fMatch[2]);
+                return `${start}-${start + num - 1}`;
+            }
+            return `${fMatch[1]}-${fMatch[2]}`;
         }
 
         function selectJob(jobId) {
@@ -614,6 +644,7 @@
             const btnMoveUp = document.getElementById('btn-move-up');
             const btnMoveDown = document.getElementById('btn-move-down');
             const btnLogs = document.getElementById('btn-logs');
+            const btnOutput = document.getElementById('btn-output');
 
             // Reset all to disabled
             btnStart.disabled = true;
@@ -623,13 +654,26 @@
             btnMoveUp.disabled = true;
             btnMoveDown.disabled = true;
             btnLogs.disabled = true;
+            // Jobs from Houdini know where their frames go
+            btnOutput.disabled = !(selectedJobId && globalState.jobs[selectedJobId] && globalState.jobs[selectedJobId].output_dir);
+
+            // The buttons act on the selected task if there is one, otherwise on the selected job. Say which.
+            let target = '';
+            if (selectedTaskId && globalState.tasks[selectedTaskId]) {
+                target = ' Task';
+            } else if (selectedJobId && globalState.jobs[selectedJobId]) {
+                target = ' Job';
+            }
+            btnStart.textContent = 'Start' + target;
+            btnPause.textContent = 'Pause' + target;
+            btnCancel.textContent = 'Cancel' + target;
 
             if (selectedTaskId && globalState.tasks[selectedTaskId]) {
                 // Task is selected, toolbar actions apply to the task
                 const task = globalState.tasks[selectedTaskId];
                 btnLogs.disabled = false;
-                
-                if (['paused', 'failed', 'cancelled'].includes(task.status)) {
+
+                if (['paused', 'failed', 'cancelled', 'completed'].includes(task.status)) {
                     btnStart.disabled = false;
                 }
                 if (['queued'].includes(task.status)) {
@@ -639,20 +683,24 @@
                     btnCancel.disabled = false;
                 }
             } else if (selectedJobId && globalState.jobs[selectedJobId]) {
-                // Job is selected, toolbar actions apply to the job
-                const job = globalState.jobs[selectedJobId];
+                // Job is selected, toolbar actions apply to the job.
+                // Each button is enabled when at least one task would be affected by it.
+                const statuses = Object.values(globalState.tasks)
+                    .filter(t => t.job_id === selectedJobId)
+                    .map(t => t.status);
+                const anyTask = (wanted) => statuses.some(s => wanted.includes(s));
                 btnDelete.disabled = false;
-                
-                if (['paused', 'failed', 'cancelled', 'completed'].includes(job.status)) {
+
+                if (anyTask(['paused', 'failed', 'cancelled'])) {
                     btnStart.disabled = false;
                 }
-                if (['queued', 'running', 'failed'].includes(job.status)) {
+                if (anyTask(['queued'])) {
                     btnPause.disabled = false;
                 }
-                if (['queued', 'running', 'paused', 'failed'].includes(job.status)) {
+                if (anyTask(['queued', 'running', 'paused'])) {
                     btnCancel.disabled = false;
                 }
-                
+
                 // Enable Up/Down queue buttons
                 const jobOrder = globalState.job_order || [];
                 const idx = jobOrder.indexOf(selectedJobId);
@@ -686,6 +734,9 @@
             if (action === 'cancel') {
                 if (!confirm(`Are you sure you want to cancel this ${targetType === 'tasks' ? 'task' : 'job'}?`)) return;
             }
+            if (action === 'start' && targetType === 'tasks' && globalState.tasks[targetId]?.status === 'completed') {
+                if (!confirm('This task already completed. Render it again?')) return;
+            }
 
             try {
                 await fetch(`/api/${targetType}/${targetId}/${action}`, { method: action === 'delete' ? 'DELETE' : 'POST' });
@@ -697,6 +748,21 @@
             } catch (err) {
                 console.error(err);
                 alert(`Failed to ${action} ${targetType}`);
+            }
+        }
+
+        // Opens the folder in Explorer on the machine the manager runs on
+        async function openOutput() {
+            if (!selectedJobId) return;
+            try {
+                const res = await fetch(`/api/jobs/${selectedJobId}/open-output`, { method: 'POST' });
+                if (!res.ok) {
+                    const err = await res.json();
+                    alert(err.error || 'Could not open the output folder');
+                }
+            } catch (err) {
+                console.error(err);
+                alert('Could not open the output folder');
             }
         }
 
@@ -732,10 +798,7 @@
         
         function openSelectedTaskLog() {
             if (!selectedTaskId) return;
-            const t = globalState.tasks[selectedTaskId];
-            let fMatch = t.command.match(/-f\s+([0-9.]+)\s+([0-9.]+)/);
-            let frames = fMatch ? `${fMatch[1]}-${fMatch[2]}` : 'N/A';
-            openLogModal(selectedTaskId, frames);
+            openLogModal(selectedTaskId, taskFrames(globalState.tasks[selectedTaskId]));
         }
 
         function closeLogModal() {

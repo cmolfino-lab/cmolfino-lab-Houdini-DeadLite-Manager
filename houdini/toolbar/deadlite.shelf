@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<shelfDocument>
+  <!-- Tool name: Submit to DeadLite | Houdini 21 / 22
+       Install: copy to <a folder on HOUDINI_PATH>/toolbar/deadlite.shelf, together with
+       scripts/python/deadlite_submit.py from the same repository. Restart Houdini, then add
+       the shelf via the "+" at the right of the shelf set > Shelves > DeadLite. -->
+
+  <toolshelf name="deadlite" label="DeadLite">
+    <memberTool name="deadlite_submit"/>
+  </toolshelf>
+
+  <tool name="deadlite_submit" label="Submit to DeadLite" icon="PLASMA_App">
+    <helpText><![CDATA[Sends the selected render nodes to the DeadLite manager.
+
+USD Render ROPs are baked to USD and rendered with husk. Any other ROP (Redshift, geometry caches, simulations) is rendered by hython from a snapshot of the scene.]]></helpText>
+    <script scriptType="python"><![CDATA[
+import importlib
+
+import deadlite_submit
+
+# Reloaded on every click, so edits to the module show up without a restart
+importlib.reload(deadlite_submit)
+deadlite_submit.main(kwargs)
+]]></script>
+  </tool>
+</shelfDocument>

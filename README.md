@@ -16,31 +16,88 @@ You can download the latest pre-compiled, portable executables for Windows from 
 
 ## Features
 * **Zero-Installation:** Runs entirely from portable `.exe` files. No databases, no background services, no complex setup.
+* **Submit from Houdini:** A **Submit to DeadLite** shelf tool sends the selected render node straight to the manager. No `.bat` files, no manual USD export.
+* **Two render routes:** USD Render ROPs are baked to USD once and rendered with `husk`, which starts immediately and needs no scene load. Any other ROP (Redshift, geometry caches, simulations) is rendered by `hython` from a snapshot of the scene.
+* **Frames per task:** Each job is cut into tasks of a few frames. A task is one render process on one machine, so the machines share the job and GPU memory is released between tasks.
+* **Reliable cancel:** Cancelling or deleting stops the whole render process tree. Closing a worker stops its render and puts the task back in the queue.
+* **Resume:** A task that is cancelled or fails part-way restarts at the frames that are not on disk yet. A task that fails on one machine is tried on the other first.
+* **Version matching:** Each worker finds its own Houdini installs. A job only goes to a worker that has the Houdini version it was submitted from.
 * **Visual Queue Prioritization:** Instantly adjust rendering priority by moving jobs up or down physically using **▲ Move Up** and **▼ Move Down** buttons on the dashboard.
 * **Queue-Aware Dispatching:** Connected worker nodes automatically respect your queue order, concentrating resources on the highest-priority job at the top of the queue first before cascading to the next.
-* **Houdini & Solaris Native:** Specifically designed to parse `.bat` files generated from Houdini containing `hython`, `hrender`, or `husk` commands.
 * **Multi-Engine Support:** Works out-of-the-box with **Karma CPU**, **Karma XPU**, and **Redshift**.
 * **Real-time Progress Tracking:** Intercepts `ALF_PROGRESS` statements natively from Houdini's command-line tools to provide live, dynamic progress bars in the UI.
 * **Responsive Dashboard:** A clean, modern Web UI to track your Jobs, Tasks, and Worker statuses.
 
-*(Note: Houdini DeadLite Manager is explicitly hard-coded to parse Houdini rendering prefixes. Out of the box, it will not work with other DCCs like Maya or Blender without modification.)*
+*(Note: Houdini DeadLite Manager is explicitly hard-coded for Houdini. Out of the box, it will not work with other DCCs like Maya or Blender without modification.)*
 
 ## Architecture
 Houdini DeadLite Manager uses a simple Manager/Worker architecture over standard HTTP requests:
 * **`deadlite_manager.exe`**: Acts as the central server and hosts the dashboard UI on port `5000`. You run this on your main workstation.
-* **`deadlite_worker.exe`**: Acts as the client. You run this on any rendering nodes on your network. It quietly polls the manager for `.bat` commands and executes them.
+* **`deadlite_worker.exe`**: Acts as the client. You run this on any rendering nodes on your network (one per machine). It polls the manager for tasks and reports progress back every two seconds.
+* **`houdini/`**: The shelf tool that submits jobs from inside Houdini.
+
+The queue lives in the manager's memory: closing the manager clears it. Renders carry on while it is closed, and are stopped once a manager is running again that no longer knows about them.
 
 ## Usage
 
-1. **Download** the latest `deadlite_manager.exe` and `deadlite_worker.exe` from the [Releases](https://github.com/cmolfino-lab/cmolfino-lab-Houdini-DeadLite-Manager/releases) page.
+1. **Download** the latest `deadlite_manager.exe` and `deadlite_worker.exe` from the [Releases](https://github.com/cmolfino-lab/cmolfino-lab-Houdini-DeadLite-Manager/releases) page. The manager and every worker must be the same version; a worker on a different one is shown as **Outdated** and gets no work.
 2. **Launch `deadlite_manager.exe`** on your main workstation.
-3. **Launch `deadlite_worker.exe`** on any machines you want to use for rendering. (Ensure their `config.json` points to the Manager's IP address).
+3. **Launch `deadlite_worker.exe`** on any machines you want to use for rendering, including the workstation itself. On first start it writes a `config.json` next to the exe; set `MANAGER_URL` to the manager's host name or IP address, e.g. `http://my-workstation:5000`, and restart the worker.
 4. **Open the Dashboard**: Navigate to `http://localhost:5000` in your web browser.
-5. **Submit a Job**: Drag and drop a Houdini `.bat` file (see below) onto the dashboard to start rendering!
+5. **Submit a Job** from Houdini (see below).
 
-## Generating .bat Files (Houdini Shelf Tools)
+Uploaded `.bat` jobs wait for **Start**. Select a single task and press **Start Task** to test-render one chunk before releasing the whole job.
 
-To use Houdini DeadLite Manager, you need to generate chunked `.bat` files from Houdini. Below are two Python scripts you can paste into your **Houdini Shelf Tools** to automatically generate compatible files.
+### Worker `config.json`
+
+| Key | Meaning |
+|---|---|
+| `MANAGER_URL` | Where the manager is, e.g. `http://my-workstation:5000`. |
+| `HOUDINI_DIRS` | Optional list of extra folders that contain `Houdini <version>` installs. `C:\Program Files\Side Effects Software` is always searched. |
+
+## Submitting from Houdini
+
+### Install
+
+Copy the two files in `houdini/` into any folder on your `HOUDINI_PATH` (a package folder, or your Houdini preferences folder), keeping their sub-folders:
+
+```
+houdini/scripts/python/deadlite_submit.py   ->  <folder>/scripts/python/deadlite_submit.py
+houdini/toolbar/deadlite.shelf              ->  <folder>/toolbar/deadlite.shelf
+```
+
+Restart Houdini, then add the shelf: the **+** at the right of the shelf set > **Shelves** > **DeadLite**. Works in Houdini 21 and 22.
+
+### Use
+
+1. Select the node to render: a USD Render ROP (in `/out`, a ROP network, or a LOP network), or any other ROP.
+2. Click **Submit to DeadLite**. The dialog is prefilled from the node:
+   * **Frames**: start, end and step.
+   * **Frames per task**: how many frames each render process does. Aim for roughly 10-20 minutes per task: more frames for light scenes, fewer for heavy ones. `0` keeps everything in one task.
+   * **USD renders**: *Bake USD, render with husk* (default) or *Open the scene with hython*.
+   * **Keep caches and simulations in one task**: on by default, because a simulation cannot be split across machines.
+   * **Manager**: the manager's address. Remembered between sessions.
+3. Press **Submit**. The job appears on the dashboard.
+
+Each job gets a folder in `$HIP/deadlite/` holding what the workers load: the baked USD, or a snapshot of the `.hip`. Later edits to your scene do not change a job that is already queued. These folders are not cleaned up automatically.
+
+Everything set on the USD Render ROP is used, on both routes: render delegate, Render Settings, Render Pass, Override Camera, Override Resolution, Override Output Image, the Husk tab and so on. For the husk route the tool does not interpret these itself: it lets the node put its husk command line together and records it, so options added in future Houdini versions are carried over too.
+
+An **Override Output Image** can use `$F4` as usual, e.g. `$HIP/render/$OS/$OS.$F4.exr`. The backslash that the warning under the parameter asks for is not needed: the frame number is handed to husk as its own `<F4>` token. An override driven by an expression that changes per frame cannot be passed on this way; the husk route refuses it with a message, and the hython route falls back to one husk process per frame.
+
+Paths must be reachable from every worker under the same drive letters. A worker that cannot reach the scene file says so in the task's log.
+
+## Building and testing
+
+`build_exes.bat` builds both executables into `dist/` with PyInstaller (needs `flask`, `requests` and `pyinstaller` in `venv`). Close the running manager and worker first, or the old exes cannot be replaced.
+
+```
+venv\Scripts\python -m unittest discover tests -b
+```
+
+## Fallback: .bat files
+
+A `.bat` file can still be uploaded with **Submit Job** on the dashboard. Each `hython`, `hrender` or `husk` line becomes one task, run in the folder of the preceding `cd /d` line. Such a job is tied to the Houdini path written in the file, so every worker needs that exact build in the same place, and it cannot resume part-way. The two scripts below generate compatible files.
 
 ### 1. Solaris / USD (.bat Generator)
 Use this tool when rendering a baked `.usd` file via `husk`. It allows you to explicitly force the GPU/CPU render delegate.
