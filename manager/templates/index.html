@@ -16,6 +16,8 @@
             --row-alt: #252526;
             --row-hover: #2a2d2e;
             --row-selected-deadline: #22c55e;
+            /* scrollbars and other browser-drawn parts match the dark theme */
+            color-scheme: dark;
         }
 
         body, html {
@@ -262,6 +264,31 @@
             font-weight: 600;
             display: block;
         }
+
+        .job-pos {
+            text-align: center;
+            font-weight: bold;
+            color: var(--accent-green);
+        }
+        tr.selected .job-pos { color: #000; }
+
+        /* Buttons inside table rows (workers) */
+        .row-btn {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 1px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .row-btn:hover { background: rgba(255,255,255,0.1); }
+
+        /* A .bat file is being dragged over the window */
+        body.dropping .main-grid {
+            outline: 2px dashed var(--accent-green);
+            outline-offset: -6px;
+        }
     </style>
 </head>
 <body>
@@ -307,6 +334,8 @@
                             <th>Job Name</th>
                             <th>Status</th>
                             <th>Progress</th>
+                            <th>Done</th>
+                            <th>Left</th>
                             <th>Time</th>
                             <th>Submitted</th>
                             <th>ID</th>
@@ -356,7 +385,9 @@
                         <tr>
                             <th>Worker Name</th>
                             <th>Status</th>
+                            <th>Houdini</th>
                             <th>Last Update</th>
+                            <th style="width: 80px;"></th>
                         </tr>
                     </thead>
                     <tbody id="workers-tbody">
@@ -381,16 +412,28 @@
     </div>
 
     <script>
-        let globalState = { tasks: {}, jobs: {}, workers: {} };
+        let globalState = { tasks: {}, jobs: {}, workers: {}, job_order: [] };
         let selectedJobId = null;
         let selectedTaskId = null;
         let activeLogTaskId = null;
+        let logOffset = null;      // how much of the open task's log has been fetched
+        let logBusy = false;
+
+        const jobsTbody = document.getElementById('jobs-tbody');
+        const tasksTbody = document.getElementById('tasks-tbody');
+        const workersTbody = document.getElementById('workers-tbody');
+
+        // Names come from file names and machine names: never trust them as HTML
+        function esc(text) {
+            return String(text).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+        }
 
         // --- File Upload Logic ---
-        document.getElementById('file-input').addEventListener('change', async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-
+        async function uploadBat(file) {
+            if (!file.name.toLowerCase().endsWith('.bat')) {
+                alert(`${file.name} is not a .bat file`);
+                return;
+            }
             const formData = new FormData();
             formData.append('file', file);
 
@@ -400,15 +443,43 @@
                     body: formData
                 });
                 if (res.ok) {
-                    // Reset input
-                    e.target.value = '';
                     fetchState();
                 } else {
-                    alert('Upload failed');
+                    const err = await res.json();
+                    alert(`Upload failed: ${err.error || 'unknown error'}`);
                 }
             } catch (err) {
                 console.error(err);
                 alert('Upload error');
+            }
+        }
+
+        document.getElementById('file-input').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            await uploadBat(file);
+            // Reset input
+            e.target.value = '';
+        });
+
+        // .bat files can also be dropped anywhere on the dashboard
+        let dragDepth = 0;
+        window.addEventListener('dragenter', (e) => {
+            e.preventDefault();
+            dragDepth++;
+            document.body.classList.add('dropping');
+        });
+        window.addEventListener('dragover', (e) => e.preventDefault());
+        window.addEventListener('dragleave', () => {
+            dragDepth = Math.max(0, dragDepth - 1);
+            if (!dragDepth) document.body.classList.remove('dropping');
+        });
+        window.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            dragDepth = 0;
+            document.body.classList.remove('dropping');
+            for (const file of e.dataTransfer.files) {
+                await uploadBat(file);
             }
         });
 
@@ -417,24 +488,14 @@
             try {
                 const res = await fetch('/api/state');
                 globalState = await res.json();
-                renderState();
 
                 // If a job is selected but it was deleted (e.g. from another tab or just now), clear selection
                 if (selectedJobId && !globalState.jobs[selectedJobId]) {
                     selectedJobId = null;
                     selectedTaskId = null;
-                    updateToolbar();
                 }
-
-                // If modal is open, update logs
-                if (activeLogTaskId && globalState.tasks[activeLogTaskId]) {
-                    const logContent = document.getElementById('log-content');
-                    const isNearBottom = logContent.scrollHeight - logContent.scrollTop <= logContent.clientHeight + 50;
-                    logContent.textContent = globalState.tasks[activeLogTaskId].logs || "No logs available yet.";
-                    if (isNearBottom) {
-                        logContent.scrollTop = logContent.scrollHeight;
-                    }
-                }
+                renderState();
+                fetchLog();
             } catch (err) {
                 console.error("Failed to fetch state:", err);
             }
@@ -456,155 +517,10 @@
             return `${s}s`;
         }
 
-        function getProgressBarHtml(progressPercent) {
-            const p = Math.max(0, Math.min(100, progressPercent || 0));
-            return `
-                <div class="progress-cell">
-                    <div class="progress-bar-bg"></div>
-                    <div class="progress-bar-fill" style="width: ${p}%;"></div>
-                    <span class="progress-text">${p}%</span>
-                </div>
-            `;
-        }
-
-        function renderState() {
-            // Render Jobs in queue order
-            const jobsTbody = document.getElementById('jobs-tbody');
-            const jobs = [];
-            if (globalState.job_order) {
-                for (const job_id of globalState.job_order) {
-                    if (globalState.jobs[job_id]) {
-                        jobs.push(globalState.jobs[job_id]);
-                    }
-                }
-            }
-            // Fallback for any jobs not listed in job_order
-            for (const job of Object.values(globalState.jobs)) {
-                if (!jobs.find(j => j.id === job.id)) {
-                    jobs.push(job);
-                }
-            }
-            
-            document.getElementById('jobs-count').innerText = `${jobs.length} total`;
-            
-            let jobsHtml = '';
-            for (let i = 0; i < jobs.length; i++) {
-                const job = jobs[i];
-                const isSelected = job.id === selectedJobId ? 'selected' : '';
-                
-                // Calculate job progress and total time
-                let jobTasks = Object.values(globalState.tasks).filter(t => t.job_id === job.id);
-                let totalProgress = 0;
-                let jobTime = 0;
-                for (const t of jobTasks) {
-                    totalProgress += (t.progress || 0);
-                    if (t.start_time) {
-                        const end = t.end_time || (Date.now() / 1000);
-                        jobTime += Math.max(0, end - t.start_time);
-                    }
-                }
-                const avgProgress = jobTasks.length ? Math.floor(totalProgress / jobTasks.length) : 0;
-                const jobDurationStr = jobTime > 0 ? formatDurationSecs(jobTime) : '-';
-
-                // A job keeps rendering its other tasks after one fails, so show failures next to the status
-                const failedCount = jobTasks.filter(t => t.status === 'failed').length;
-                const failedNote = (failedCount && job.status !== 'failed') ? ` <span class="status-failed">(${failedCount} failed)</span>` : '';
-                const warningCount = jobTasks.filter(t => t.warning).length;
-                const warningNote = warningCount ? ` <span class="status-paused">(${warningCount} with warnings)</span>` : '';
-                // Queued with no machine able to take it: say what it is waiting for
-                const waitingNote = job.waiting_for ? ` <span class="status-paused">- waiting for ${job.waiting_for}</span>` : '';
-
-                jobsHtml += `
-                    <tr class="${isSelected}" onclick="selectJob('${job.id}')">
-                        <td style="text-align: center; font-weight: bold; color: var(--accent-green);">#${i + 1}</td>
-                        <td>${job.name}</td>
-                        <td class="status-${job.status}">${job.status}${failedNote}${warningNote}${waitingNote}</td>
-                        <td>${getProgressBarHtml(avgProgress)}</td>
-                        <td>${jobDurationStr}</td>
-                        <td>${formatTime(job.created_at)}</td>
-                        <td>${job.id.substring(0, 8)}</td>
-                    </tr>
-                `;
-            }
-            jobsTbody.innerHTML = jobsHtml;
-
-            // Render Tasks (for selected job)
-            const tasksTbody = document.getElementById('tasks-tbody');
-            if (selectedJobId && globalState.jobs[selectedJobId]) {
-                const tasks = Object.values(globalState.tasks)
-                    .filter(t => t.job_id === selectedJobId)
-                    .sort((a, b) => a.index - b.index); // same order as the submitted file, which is the order they are handed out
-                
-                // For a job from Houdini, say how it renders next to the count
-                const job = globalState.jobs[selectedJobId];
-                const jobInfo = job.type ? `${job.type} · Houdini ${job.houdini} · ` : '';
-                document.getElementById('tasks-count').innerText = `${jobInfo}${tasks.length} total`;
-
-                let tasksHtml = '';
-                for (let i=0; i<tasks.length; i++) {
-                    const t = tasks[i];
-                    const isSelected = t.id === selectedTaskId ? 'selected' : '';
-                    const frames = taskFrames(t);
-                    // Frames already on disk are skipped if the task is started again
-                    const doneCount = (t.done_frames || []).length;
-                    const doneNote = (doneCount && t.status !== 'completed') ? ` (${doneCount}/${t.frames.length} done)` : '';
-
-                    let taskTime = 0;
-                    if (t.start_time) {
-                        const end = t.end_time || (Date.now() / 1000);
-                        taskTime = Math.max(0, end - t.start_time);
-                    }
-                    const taskDurationStr = taskTime > 0 ? formatDurationSecs(taskTime) : '-';
-
-                    tasksHtml += `
-                        <tr class="${isSelected}" onclick="selectTask('${t.id}')" ondblclick="openLogModal('${t.id}', '${frames}')">
-                            <td>${i}</td>
-                            <td>${frames}${doneNote}</td>
-                            <td class="status-${t.status}">${t.status}${t.attempt > 1 ? ` (try ${t.attempt})` : ''}${t.warning ? ` <span class="status-paused">- ${t.warning}</span>` : ''}</td>
-                            <td>${getProgressBarHtml(t.progress || 0)}</td>
-                            <td>${taskDurationStr}</td>
-                            <td>${t.worker_id || '-'}</td>
-                        </tr>
-                    `;
-                }
-                tasksTbody.innerHTML = tasksHtml;
-            } else {
-                tasksTbody.innerHTML = '';
-                document.getElementById('tasks-count').innerText = `0 total`;
-            }
-
-            // Render Workers
-            const workersTbody = document.getElementById('workers-tbody');
-            const workers = Object.values(globalState.workers);
-            document.getElementById('workers-count').innerText = `${workers.length} total`;
-            
-            let workersHtml = '';
-            for (const w of workers) {
-                // The manager decides who is online, so this does not depend on the browser's clock
-                let status = 'Idle';
-                let statusColor = 'status-completed';
-                if (w.status === 'offline') {
-                    status = 'Offline';
-                    statusColor = 'status-failed';
-                } else if (w.outdated) {
-                    status = 'Outdated - update this worker to the same version as the manager';
-                    statusColor = 'status-paused';
-                } else if (w.status === 'running') {
-                    status = 'Rendering';
-                    statusColor = 'status-running';
-                }
-
-                workersHtml += `
-                    <tr>
-                        <td>${w.id}</td>
-                        <td class="${statusColor}">${status}</td>
-                        <td>${formatTime(w.last_seen)}</td>
-                    </tr>
-                `;
-            }
-            workersTbody.innerHTML = workersHtml;
-
-            updateToolbar();
+        function taskSeconds(t) {
+            if (!t.start_time) return 0;
+            const end = t.end_time || (Date.now() / 1000);
+            return Math.max(0, end - t.start_time);
         }
 
         // Frames a task covers. A job from Houdini carries them; for a .bat they are read from the command.
@@ -624,6 +540,240 @@
             }
             return `${fMatch[1]}-${fMatch[2]}`;
         }
+
+        // How far a job is, counted in frames when the job knows its frames and in tasks otherwise,
+        // and a rough estimate of the time left from how long the finished part took.
+        function jobProgress(jobTasks) {
+            const inFrames = jobTasks.some(t => t.frames && t.frames.length);
+            let done = 0, total = 0;
+            // For the estimate: work rendered so far and the time it took, work still to do, machines on it
+            let rendered = 0, seconds = 0, remaining = 0, rendering = 0;
+            for (const t of jobTasks) {
+                const size = inFrames ? t.frames.length : 1;
+                const finished = t.status === 'completed' ? size : (inFrames ? (t.done_frames || []).length : 0);
+                total += size;
+                done += finished;
+
+                if (t.status === 'completed') {
+                    rendered += size;
+                    seconds += taskSeconds(t);
+                } else if (t.status === 'running') {
+                    // Without frame-by-frame information the progress bar still tells how far it is
+                    const partly = Math.max(finished, size * (t.progress || 0) / 100);
+                    rendered += partly;
+                    seconds += taskSeconds(t);
+                    remaining += size - partly;
+                    rendering++;
+                } else if (t.status === 'queued') {
+                    remaining += size - finished;
+                }
+            }
+
+            let left = '';
+            if (rendering && remaining > 0 && rendered > 0) {
+                left = '~' + formatDurationSecs((seconds / rendered) * remaining / rendering);
+            }
+            return { text: `${done}/${total} ${inFrames ? 'frames' : 'tasks'}`, left: left };
+        }
+
+        // Table rows are kept, and only the cells whose content changed are touched.
+        // Rebuilding the tables on every refresh used to swallow clicks that landed mid-rebuild.
+        function syncRows(tbody, rows) {
+            const existing = new Map();
+            for (const tr of tbody.children) existing.set(tr.dataset.id, tr);
+
+            let previous = null;
+            for (const row of rows) {
+                let tr = existing.get(row.id);
+                if (tr) {
+                    existing.delete(row.id);
+                } else {
+                    tr = document.createElement('tr');
+                    tr.dataset.id = row.id;
+                    for (let i = 0; i < row.cells.length; i++) tr.appendChild(document.createElement('td'));
+                }
+                if (tr.className !== row.className) tr.className = row.className;
+                row.cells.forEach((cell, i) => updateCell(tr.children[i], cell));
+
+                const shouldFollow = previous ? previous.nextSibling : tbody.firstChild;
+                if (tr !== shouldFollow) tbody.insertBefore(tr, shouldFollow);
+                previous = tr;
+            }
+            for (const tr of existing.values()) tr.remove();
+        }
+
+        // A cell is either {html, className} or {progress}
+        function updateCell(td, cell) {
+            if (cell.progress !== undefined) {
+                const p = Math.max(0, Math.min(100, cell.progress || 0));
+                if (!td.firstChild) {
+                    td.innerHTML = `
+                        <div class="progress-cell">
+                            <div class="progress-bar-bg"></div>
+                            <div class="progress-bar-fill"></div>
+                            <span class="progress-text"></span>
+                        </div>
+                    `;
+                }
+                if (td.shown !== p) {
+                    td.querySelector('.progress-bar-fill').style.width = `${p}%`;
+                    td.querySelector('.progress-text').textContent = `${p}%`;
+                    td.shown = p;
+                }
+                return;
+            }
+            if (td.shown !== cell.html) {
+                td.innerHTML = cell.html;
+                td.shown = cell.html;
+            }
+            const className = cell.className || '';
+            if (td.className !== className) td.className = className;
+        }
+
+        function renderState() {
+            const tasksByJob = {};
+            for (const t of Object.values(globalState.tasks)) {
+                (tasksByJob[t.job_id] = tasksByJob[t.job_id] || []).push(t);
+            }
+
+            // Render Jobs in queue order
+            const jobs = [];
+            for (const job_id of globalState.job_order || []) {
+                if (globalState.jobs[job_id]) {
+                    jobs.push(globalState.jobs[job_id]);
+                }
+            }
+            document.getElementById('jobs-count').innerText = `${jobs.length} total`;
+
+            syncRows(jobsTbody, jobs.map((job, i) => {
+                const jobTasks = tasksByJob[job.id] || [];
+
+                // Calculate job progress and total time
+                let totalProgress = 0;
+                let jobTime = 0;
+                for (const t of jobTasks) {
+                    totalProgress += (t.progress || 0);
+                    jobTime += taskSeconds(t);
+                }
+                const avgProgress = jobTasks.length ? Math.floor(totalProgress / jobTasks.length) : 0;
+                const progress = jobProgress(jobTasks);
+
+                // A job keeps rendering its other tasks after one fails, so show failures next to the status
+                const failedCount = jobTasks.filter(t => t.status === 'failed').length;
+                const failedNote = (failedCount && job.status !== 'failed') ? ` <span class="status-failed">(${failedCount} failed)</span>` : '';
+                const warningCount = jobTasks.filter(t => t.warning).length;
+                const warningNote = warningCount ? ` <span class="status-paused">(${warningCount} with warnings)</span>` : '';
+                // Queued with no machine able to take it: say what it is waiting for
+                const waitingNote = job.waiting_for ? ` <span class="status-paused">- waiting for ${esc(job.waiting_for)}</span>` : '';
+
+                return {
+                    id: job.id,
+                    className: job.id === selectedJobId ? 'selected' : '',
+                    cells: [
+                        { html: `#${i + 1}`, className: 'job-pos' },
+                        { html: esc(job.name) },
+                        { html: `${job.status}${failedNote}${warningNote}${waitingNote}`, className: `status-${job.status}` },
+                        { progress: avgProgress },
+                        { html: progress.text },
+                        { html: progress.left || '-' },
+                        { html: formatDurationSecs(jobTime) },
+                        { html: formatTime(job.created_at) },
+                        { html: job.id.substring(0, 8) }
+                    ]
+                };
+            }));
+
+            // Render Tasks (for selected job)
+            const job = selectedJobId && globalState.jobs[selectedJobId];
+            // same order as the submitted file, which is the order they are handed out
+            const tasks = job ? (tasksByJob[job.id] || []).sort((a, b) => a.index - b.index) : [];
+            // For a job from Houdini, say how it renders next to the count
+            const jobInfo = (job && job.type) ? `${job.type} · Houdini ${esc(job.houdini)} · ` : '';
+            document.getElementById('tasks-count').innerText = `${jobInfo}${tasks.length} total`;
+
+            syncRows(tasksTbody, tasks.map((t, i) => {
+                // Frames already on disk are skipped if the task is started again
+                const doneCount = (t.done_frames || []).length;
+                const doneNote = (doneCount && t.status !== 'completed') ? ` (${doneCount}/${t.frames.length} done)` : '';
+                const tryNote = t.attempt > 1 ? ` (try ${t.attempt})` : '';
+                const warningNote = t.warning ? ` <span class="status-paused">- ${esc(t.warning)}</span>` : '';
+
+                return {
+                    id: t.id,
+                    className: t.id === selectedTaskId ? 'selected' : '',
+                    cells: [
+                        { html: `${i}` },
+                        { html: `${taskFrames(t)}${doneNote}` },
+                        { html: `${t.status}${tryNote}${warningNote}`, className: `status-${t.status}` },
+                        { progress: t.progress || 0 },
+                        { html: formatDurationSecs(taskSeconds(t)) },
+                        { html: esc(t.worker_id || '-') }
+                    ]
+                };
+            }));
+
+            // Render Workers
+            const workers = Object.values(globalState.workers);
+            document.getElementById('workers-count').innerText = `${workers.length} total`;
+
+            syncRows(workersTbody, workers.map(w => {
+                // The manager decides who is online, so this does not depend on the browser's clock
+                let status = 'Idle';
+                let statusColor = 'status-completed';
+                let action = 'disable';
+                let actionLabel = 'Disable';
+                if (w.status === 'offline') {
+                    status = 'Offline';
+                    statusColor = 'status-failed';
+                    action = 'remove';
+                    actionLabel = 'Remove';
+                } else if (w.outdated) {
+                    status = 'Outdated - update this worker to the same version as the manager';
+                    statusColor = 'status-paused';
+                } else if (!w.enabled) {
+                    // Switched off here on the dashboard: it finishes what it is doing and takes nothing new
+                    status = w.status === 'running' ? 'Rendering its last task, then disabled' : 'Disabled';
+                    statusColor = 'status-paused';
+                    action = 'enable';
+                    actionLabel = 'Enable';
+                } else if (w.status === 'running') {
+                    status = 'Rendering';
+                    statusColor = 'status-running';
+                }
+
+                return {
+                    id: w.id,
+                    className: '',
+                    cells: [
+                        { html: esc(w.id) },
+                        { html: status, className: statusColor },
+                        { html: esc((w.houdini || []).join(', ') || '-') },
+                        { html: formatTime(w.last_seen) },
+                        { html: `<button class="row-btn" data-action="${action}">${actionLabel}</button>` }
+                    ]
+                };
+            }));
+
+            updateToolbar();
+        }
+
+        // One listener per table instead of one per row: rows come and go
+        jobsTbody.addEventListener('click', (e) => {
+            const tr = e.target.closest('tr');
+            if (tr) selectJob(tr.dataset.id);
+        });
+        tasksTbody.addEventListener('click', (e) => {
+            const tr = e.target.closest('tr');
+            if (tr) selectTask(tr.dataset.id);
+        });
+        tasksTbody.addEventListener('dblclick', (e) => {
+            const tr = e.target.closest('tr');
+            if (tr) openLogModal(tr.dataset.id);
+        });
+        workersTbody.addEventListener('click', (e) => {
+            const button = e.target.closest('button[data-action]');
+            if (button) workerAction(button.closest('tr').dataset.id, button.dataset.action);
+        });
 
         function selectJob(jobId) {
             selectedJobId = jobId;
@@ -716,7 +866,7 @@
         async function jobAction(action) {
             let targetId = null;
             let targetType = null;
-            
+
             if (selectedTaskId) {
                 targetId = selectedTaskId;
                 targetType = 'tasks';
@@ -726,7 +876,7 @@
             } else {
                 return;
             }
-            
+
             if (action === 'delete') {
                 if (targetType === 'tasks') return; // Cannot delete tasks individually
                 if (!confirm('Are you sure you want to permanently delete this job?')) return;
@@ -748,6 +898,21 @@
             } catch (err) {
                 console.error(err);
                 alert(`Failed to ${action} ${targetType}`);
+            }
+        }
+
+        // Enable or disable a machine, or drop one that is gone from the list
+        async function workerAction(workerId, action) {
+            try {
+                if (action === 'remove') {
+                    await fetch(`/api/workers/${encodeURIComponent(workerId)}`, { method: 'DELETE' });
+                } else {
+                    await fetch(`/api/workers/${encodeURIComponent(workerId)}/${action}`, { method: 'POST' });
+                }
+                fetchState();
+            } catch (err) {
+                console.error(err);
+                alert(`Failed to ${action} ${workerId}`);
             }
         }
 
@@ -786,19 +951,63 @@
             }
         }
 
-        // Modal functions
-        function openLogModal(taskId, title) {
+        // --- Log window ---
+        // Logs live in files on the manager. Only the log that is open is fetched,
+        // and after the first look only the part that was added since.
+        const NO_LOG_YET = 'No logs available yet.';
+
+        function openLogModal(taskId) {
+            const task = globalState.tasks[taskId];
+            if (!task) return;
             activeLogTaskId = taskId;
-            document.getElementById('log-modal-title').innerText = 'Logs - ' + title;
+            logOffset = null;
+            document.getElementById('log-modal-title').innerText = 'Logs - ' + taskFrames(task);
+            document.getElementById('log-content').textContent = 'Loading...';
             document.getElementById('log-modal').style.display = 'flex';
-            const logContent = document.getElementById('log-content');
-            logContent.textContent = globalState.tasks[taskId]?.logs || "Loading...";
-            logContent.scrollTop = logContent.scrollHeight;
+            fetchLog();
         }
-        
+
+        async function fetchLog() {
+            const taskId = activeLogTaskId;
+            if (!taskId || logBusy) return;
+            logBusy = true;
+            try {
+                const query = logOffset === null ? '' : `?offset=${logOffset}`;
+                const res = await fetch(`/api/tasks/${taskId}/log${query}`);
+                if (taskId !== activeLogTaskId) return; // closed, or another log opened, while we waited
+
+                const logContent = document.getElementById('log-content');
+                if (!res.ok) {
+                    logContent.textContent = 'This task no longer exists.';
+                    return;
+                }
+                const log = await res.json();
+                const isNearBottom = logContent.scrollHeight - logContent.scrollTop <= logContent.clientHeight + 50;
+                const firstLook = logOffset === null;
+                // The task was started again and its log began afresh
+                const startedAgain = !firstLook && log.offset < logOffset;
+
+                if (firstLook || startedAgain || logContent.textContent === NO_LOG_YET) {
+                    const skipped = log.offset > 0 ? '[... earlier output not shown ...]\n' : '';
+                    logContent.textContent = (skipped + log.text) || NO_LOG_YET;
+                } else if (log.text) {
+                    logContent.appendChild(document.createTextNode(log.text));
+                }
+                logOffset = log.size;
+
+                if (firstLook || isNearBottom) {
+                    logContent.scrollTop = logContent.scrollHeight;
+                }
+            } catch (err) {
+                console.error("Failed to fetch log:", err);
+            } finally {
+                logBusy = false;
+            }
+        }
+
         function openSelectedTaskLog() {
             if (!selectedTaskId) return;
-            openLogModal(selectedTaskId, taskFrames(globalState.tasks[selectedTaskId]));
+            openLogModal(selectedTaskId);
         }
 
         function closeLogModal() {

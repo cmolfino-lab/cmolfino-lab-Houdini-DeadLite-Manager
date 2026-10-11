@@ -246,10 +246,8 @@ class LiveManagerTestCase(ScriptsMixin, unittest.TestCase):
     """A real manager on a local port and a worker pointed at it."""
 
     def setUp(self):
-        for key in ("jobs", "tasks", "workers"):
-            manager.STATE[key].clear()
-        manager.STATE["job_order"].clear()
-        manager.OUTPUTS.clear()
+        # An empty queue in its own folder for every test
+        manager.use_data_dir(tempfile.mkdtemp(dir=self.tmp.name))
 
         self.server = make_server("127.0.0.1", 0, manager.app, threaded=True)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -272,7 +270,11 @@ class LiveManagerTestCase(ScriptsMixin, unittest.TestCase):
             return next(t["id"] for t in manager.STATE["tasks"].values() if t["job_id"] == self.job_id)
 
     def task(self, task_id):
-        return requests.get(f"{self.url}/api/state").json()["tasks"].get(task_id)
+        """The task as the dashboard sees it, with its whole log added as task["logs"]."""
+        task = requests.get(f"{self.url}/api/state").json()["tasks"].get(task_id)
+        if task is not None:
+            task["logs"] = requests.get(f"{self.url}/api/tasks/{task_id}/log", params={"offset": 0}).json()["text"]
+        return task
 
     def run_worker_once(self):
         """Poll for one task and execute it, on a thread like the real worker's main loop."""

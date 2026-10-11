@@ -8,6 +8,9 @@ build/
 dist/
 *.spec
 
+# The manager's queue and logs when it is run from source
+deadlite_data/
+
 # Python caches
 __pycache__/
 *.pyc

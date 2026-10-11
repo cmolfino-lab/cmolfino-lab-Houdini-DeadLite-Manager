@@ -4,11 +4,15 @@ Run from the repository root:
     venv\\Scripts\\python -m unittest discover tests -b
 """
 import io
+import json
 import os
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'manager'))
 import app as manager
@@ -22,17 +26,17 @@ BAT = (
 )
 
 
-def reset_state():
-    for key in ("jobs", "tasks", "workers"):
-        manager.STATE[key].clear()
-    manager.STATE["job_order"].clear()
-    manager.OUTPUTS.clear()
-
-
 class ManagerTestCase(unittest.TestCase):
     def setUp(self):
-        reset_state()
+        # An empty queue in its own folder for every test
+        self.data_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.data_dir, ignore_errors=True)
+        manager.use_data_dir(self.data_dir)
         self.client = manager.app.test_client()
+
+    def restart_manager(self):
+        """What closing the manager and starting it again amounts to: everything is read back from disk."""
+        manager.use_data_dir(self.data_dir)
 
     # --- helpers ---
 
@@ -66,7 +70,10 @@ class ManagerTestCase(unittest.TestCase):
         return self.client.get("/api/state").get_json()
 
     def task(self, task_id):
-        return self.state()["tasks"][task_id]
+        """The task as the dashboard sees it, with its whole log added as task["logs"]."""
+        task = self.state()["tasks"][task_id]
+        task["logs"] = self.client.get(f"/api/tasks/{task_id}/log?offset=0").get_json()["text"]
+        return task
 
     def tasks(self, job_id):
         tasks = [t for t in self.state()["tasks"].values() if t["job_id"] == job_id]
@@ -503,6 +510,252 @@ class HoudiniJobTests(ManagerTestCase):
                 job_id = self.submit(outputs={}, output_dir=output_dir)["job_id"]
                 self.assertEqual(self.client.post(f"/api/jobs/{job_id}/open-output").status_code, 404)
             startfile.assert_not_called()
+
+
+class RestartTests(ManagerTestCase):
+    """The queue is on disk, so closing the manager loses nothing."""
+
+    HOUDINI_JOB = {"name": "shot / render", "type": "husk", "houdini": "21.0.700", "scene": "R:/shot/job.usd",
+                   "frames": [1, 20, 1], "chunk": 10,
+                   "outputs": {str(f): f"R:/shot/render/shot.{f:04d}.exr" for f in range(1, 21)}}
+
+    def test_queue_is_still_there_after_a_restart(self):
+        first = self.new_job(start=False)
+        second = self.client.post("/api/jobs", json=self.HOUDINI_JOB).get_json()["job_id"]
+        self.client.post(f"/api/jobs/{second}/move", json={"direction": "up"})
+        before = self.state()
+
+        self.restart_manager()
+
+        after = self.state()
+        self.assertEqual(after["job_order"], [second, first])
+        self.assertEqual(after["jobs"][second]["houdini"], "21.0.700")
+        self.assertEqual({t["id"]: t["status"] for t in after["tasks"].values()},
+                         {t["id"]: t["status"] for t in before["tasks"].values()})
+        # what the workers need to resume is back too
+        self.assertEqual(self.take_task("PC-A")["outputs"]["3"], "R:/shot/render/shot.0003.exr")
+
+    def test_render_in_progress_carries_on_across_a_restart(self):
+        self.client.post("/api/jobs", json=self.HOUDINI_JOB)
+        task = self.take_task("PC-A")
+        self.report("PC-A", task, logs="frame 1 done\n", progress=10, frames_done=[1])
+
+        self.restart_manager()
+
+        # The worker never noticed: its next report is accepted, not answered with "stop"
+        self.assertEqual(self.report("PC-A", task, logs="frame 2 done\n", progress=20, frames_done=[1, 2])["status"], "ok")
+        self.report("PC-A", task, "completed")
+        finished = self.task(task["id"])
+        self.assertEqual(finished["status"], "completed")
+        self.assertEqual(finished["logs"], "frame 1 done\nframe 2 done\n")
+        self.assertEqual(sorted(finished["done_frames"]), [1, 2])
+
+    def test_worker_gets_the_usual_time_to_call_in_after_a_restart(self):
+        self.new_job()
+        task = self.take_task("PC-A")
+        manager.STATE["workers"]["PC-A"]["last_seen"] = time.time() - 3600  # the manager was closed for an hour
+
+        self.restart_manager()
+
+        self.assertEqual(self.task(task["id"])["status"], "running")
+        self.assertEqual(self.state()["workers"]["PC-A"]["status"], "running")
+
+    def test_worker_that_never_calls_in_after_a_restart_loses_its_task(self):
+        self.new_job()
+        task = self.take_task("PC-A")
+        self.restart_manager()
+
+        manager.STATE["workers"]["PC-A"]["last_seen"] = time.time() - manager.WORKER_TIMEOUT - 1
+
+        self.assertEqual(self.task(task["id"])["status"], "queued")
+        self.assertEqual(self.take_task("PC-B")["id"], task["id"])
+
+    def test_file_is_only_rewritten_when_something_changed(self):
+        self.new_job(start=False)
+        self.poll("PC-A")
+        self.state()
+        queue_file = os.path.join(self.data_dir, "queue.json")
+        written = os.stat(queue_file).st_mtime_ns
+
+        time.sleep(0.05)
+        for _ in range(3):
+            self.poll("PC-A")  # an idle worker asking again changes nothing worth keeping
+            self.state()
+
+        self.assertEqual(os.stat(queue_file).st_mtime_ns, written)
+
+    def test_unreadable_queue_file_is_set_aside_not_lost(self):
+        self.new_job()
+        queue_file = os.path.join(self.data_dir, "queue.json")
+        with open(queue_file, "w") as f:
+            f.write('{"version": 1, "state": {"jobs": ')  # cut off mid-write by something else
+
+        self.restart_manager()
+
+        self.assertEqual(self.state()["jobs"], {})
+        self.assertTrue(os.path.isfile(queue_file + ".unreadable"))
+        self.new_job()  # and the manager works normally again
+
+    def test_queue_saved_by_an_older_build_is_brought_up_to_date(self):
+        job_id = self.new_job()
+        self.poll("PC-A", houdini=[])
+        queue_file = os.path.join(self.data_dir, "queue.json")
+        with open(queue_file) as f:
+            saved = json.load(f)
+        for task in saved["state"]["tasks"].values():
+            del task["warning"], task["log_size"]
+        for worker in saved["state"]["workers"].values():
+            del worker["enabled"]
+        with open(queue_file, "w") as f:
+            json.dump(saved, f)
+
+        self.restart_manager()
+
+        state = self.state()
+        self.assertTrue(state["workers"]["PC-A"]["enabled"])
+        self.assertTrue(all(t["warning"] is None and t["log_size"] == 0 for t in state["tasks"].values()))
+        self.assertEqual(state["jobs"][job_id]["status"], "running")
+
+
+class LogTests(ManagerTestCase):
+    def log(self, task_id, **params):
+        return self.client.get(f"/api/tasks/{task_id}/log", query_string=params).get_json()
+
+    def test_log_window_only_fetches_what_it_has_not_shown_yet(self):
+        self.new_job()
+        task = self.take_task("PC-A")
+        self.report("PC-A", task, logs="first\n")
+        opened = self.log(task["id"])
+        self.assertEqual(opened["text"], "first\n")
+
+        self.report("PC-A", task, logs="second\n")
+        more = self.log(task["id"], offset=opened["size"])
+
+        self.assertEqual(more["text"], "second\n")
+        self.assertEqual(self.log(task["id"], offset=more["size"])["text"], "")
+
+    def test_long_log_opens_at_its_end(self):
+        self.new_job()
+        task = self.take_task("PC-A")
+        self.report("PC-A", task, logs="old line\n" * 100 + "the end\n")
+
+        with mock.patch.object(manager, "LOG_TAIL", 16):
+            opened = self.log(task["id"])
+
+        self.assertTrue(opened["text"].endswith("the end\n"))
+        self.assertEqual(len(opened["text"]), 16)
+        self.assertEqual(opened["size"], 908)
+
+    def test_log_of_a_task_started_again_begins_afresh(self):
+        self.new_job()
+        task = self.take_task("PC-A")
+        self.report("PC-A", task, "failed", logs="a long first attempt\n")
+        seen = self.log(task["id"])["size"]
+
+        self.client.post(f"/api/tasks/{task['id']}/start")
+        again = self.take_task("PC-A")
+        self.report("PC-A", again, logs="new\n")
+
+        # the window still remembers the old length
+        self.assertEqual(self.log(task["id"], offset=seen)["text"], "new\n")
+
+    def test_dashboard_state_does_not_carry_log_text(self):
+        self.new_job()
+        task = self.take_task("PC-A")
+        self.report("PC-A", task, logs="ALF_PROGRESS 42%\n" * 1000)
+
+        payload = self.client.get("/api/state").get_data(as_text=True)
+
+        self.assertNotIn("ALF_PROGRESS", payload)
+        self.assertEqual(self.state()["tasks"][task["id"]]["log_size"], 17000)
+
+    def test_log_survives_a_restart(self):
+        self.new_job()
+        task = self.take_task("PC-A")
+        self.report("PC-A", task, logs="before the restart\n")
+
+        self.restart_manager()
+
+        self.assertEqual(self.log(task["id"])["text"], "before the restart\n")
+
+    def test_deleting_a_job_removes_its_log_files(self):
+        job_id = self.new_job()
+        task = self.take_task("PC-A")
+        self.report("PC-A", task, logs="some output\n")
+        logs_dir = os.path.join(self.data_dir, "logs")
+        self.assertEqual(os.listdir(logs_dir), [f"{task['id']}.log"])
+
+        self.client.delete(f"/api/jobs/{job_id}/delete")
+
+        self.assertEqual(os.listdir(logs_dir), [])
+
+    def test_log_of_an_unknown_task(self):
+        self.assertEqual(self.client.get("/api/tasks/..%2F..%2Fqueue/log").status_code, 404)
+
+
+class WorkerSwitchTests(ManagerTestCase):
+    """Taking a machine out of the queue from the dashboard, e.g. to work on it."""
+
+    def switch(self, worker, action):
+        return self.client.post(f"/api/workers/{worker}/{action}")
+
+    def test_disabled_worker_finishes_its_task_and_gets_no_more(self):
+        self.new_job()
+        task = self.take_task("PC-A")
+
+        self.switch("PC-A", "disable")
+
+        self.assertEqual(self.report("PC-A", task)["status"], "ok")
+        self.report("PC-A", task, "completed")
+        self.assertEqual(self.poll("PC-A")["status"], "wait")
+        self.assertFalse(self.state()["workers"]["PC-A"]["enabled"])
+
+        self.switch("PC-A", "enable")
+        self.take_task("PC-A")
+
+    def test_switch_is_remembered_across_a_restart(self):
+        self.new_job()
+        self.poll("PC-A")
+        self.switch("PC-A", "disable")
+
+        self.restart_manager()
+
+        self.assertEqual(self.poll("PC-A")["status"], "wait")
+
+    def test_disabled_worker_does_not_count_as_another_machine_to_retry_on(self):
+        self.new_job()
+        self.poll("PC-B")
+        self.switch("PC-B", "disable")
+        task = self.take_task("PC-A")
+
+        self.report("PC-A", task, "failed")
+
+        self.assertEqual(self.task(task["id"])["status"], "failed")
+
+    def test_job_says_so_when_every_machine_is_switched_off(self):
+        self.poll("PC-A")
+        self.switch("PC-A", "disable")
+        job_id = self.new_job()
+
+        self.assertEqual(self.poll("PC-A")["status"], "wait")
+        self.assertEqual(self.state()["jobs"][job_id]["waiting_for"], "a worker")
+
+    def test_only_an_offline_worker_can_be_removed_from_the_list(self):
+        self.poll("PC-GONE")
+        self.poll("PC-A")
+        self.assertEqual(self.client.delete("/api/workers/PC-A").status_code, 400)
+
+        manager.STATE["workers"]["PC-GONE"]["last_seen"] = time.time() - manager.WORKER_TIMEOUT - 1
+        self.state()
+        self.assertEqual(self.client.delete("/api/workers/PC-GONE").status_code, 200)
+
+        self.assertEqual(list(self.state()["workers"]), ["PC-A"])
+        self.assertEqual(self.client.delete("/api/workers/PC-GONE").status_code, 404)
+
+    def test_unknown_worker_or_action(self):
+        self.poll("PC-A")
+        self.assertEqual(self.switch("PC-NOPE", "disable").status_code, 404)
+        self.assertEqual(self.switch("PC-A", "explode").status_code, 404)
 
 
 class JobStatusTests(ManagerTestCase):

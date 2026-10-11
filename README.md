@@ -22,6 +22,8 @@ You can download the latest pre-compiled, portable executables for Windows from 
 * **Reliable cancel:** Cancelling or deleting stops the whole render process tree. Closing a worker stops its render and puts the task back in the queue.
 * **Resume:** A task that is cancelled or fails part-way restarts at the frames that are not on disk yet. A task that fails on one machine is tried on the other first.
 * **Version matching:** Each worker finds its own Houdini installs. A job only goes to a worker that has the Houdini version it was submitted from.
+* **Survives restarts:** The queue and the task logs are kept on disk next to the manager. Close the manager and start it again: the jobs are still there, and renders that were running carry on.
+* **Worker switch:** Disable a machine from the dashboard to keep it free. It finishes its current task and takes no more until it is enabled again.
 * **Visual Queue Prioritization:** Instantly adjust rendering priority by moving jobs up or down physically using **▲ Move Up** and **▼ Move Down** buttons on the dashboard.
 * **Queue-Aware Dispatching:** Connected worker nodes automatically respect your queue order, concentrating resources on the highest-priority job at the top of the queue first before cascading to the next.
 * **Multi-Engine Support:** Works out-of-the-box with **Karma CPU**, **Karma XPU**, and **Redshift**.
@@ -36,7 +38,9 @@ Houdini DeadLite Manager uses a simple Manager/Worker architecture over standard
 * **`deadlite_worker.exe`**: Acts as the client. You run this on any rendering nodes on your network (one per machine). It polls the manager for tasks and reports progress back every two seconds.
 * **`houdini/`**: The shelf tool that submits jobs from inside Houdini.
 
-The queue lives in the manager's memory: closing the manager clears it. Renders carry on while it is closed, and are stopped once a manager is running again that no longer knows about them.
+The manager keeps its queue in a `deadlite_data` folder next to the exe: `queue.json` plus one log file per task. Renders carry on while the manager is closed, and when it starts again each worker has 30 seconds to report in before its task is handed to someone else. Delete the folder (with the manager closed) to start with an empty queue.
+
+The manager listens on port `5000` on every network address. Set the environment variables `DEADLITE_PORT` or `DEADLITE_HOST` before starting it to change that.
 
 ## Usage
 
@@ -89,7 +93,7 @@ Paths must be reachable from every worker under the same drive letters. A worker
 
 ## Building and testing
 
-`build_exes.bat` builds both executables into `dist/` with PyInstaller (needs `flask`, `requests` and `pyinstaller` in `venv`). Close the running manager and worker first, or the old exes cannot be replaced.
+`build_exes.bat` builds both executables into `dist/` with PyInstaller. It expects a virtual environment in `venv` with the packages from `requirements.txt` (`venv\Scripts\python -m pip install -r requirements.txt`). Close the running manager and worker first, or the old exes cannot be replaced.
 
 ```
 venv\Scripts\python -m unittest discover tests -b
@@ -97,7 +101,7 @@ venv\Scripts\python -m unittest discover tests -b
 
 ## Fallback: .bat files
 
-A `.bat` file can still be uploaded with **Submit Job** on the dashboard. Each `hython`, `hrender` or `husk` line becomes one task, run in the folder of the preceding `cd /d` line. Such a job is tied to the Houdini path written in the file, so every worker needs that exact build in the same place, and it cannot resume part-way. The two scripts below generate compatible files.
+A `.bat` file can still be uploaded with **Submit Job** on the dashboard, or by dropping it anywhere on the page. Each `hython`, `hrender` or `husk` line becomes one task, run in the folder of the preceding `cd /d` line. Such a job is tied to the Houdini path written in the file, so every worker needs that exact build in the same place, and it cannot resume part-way. The two scripts below generate compatible files.
 
 ### 1. Solaris / USD (.bat Generator)
 Use this tool when rendering a baked `.usd` file via `husk`. It allows you to explicitly force the GPU/CPU render delegate.
