@@ -85,17 +85,51 @@ kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 kernel32.CreateMutexW.restype = wintypes.HANDLE
 kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
 
+kernel32.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+
 ntdll = ctypes.WinDLL('ntdll')
 ntdll.NtResumeProcess.restype = ctypes.c_long
 ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
 
+kernel32.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD, wintypes.LPVOID]
+
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 PROCESS_TERMINATE = 0x0001
 PROCESS_SET_QUOTA = 0x0100
+PROCESS_SET_INFORMATION = 0x0200
 PROCESS_SUSPEND_RESUME = 0x0800
 CREATE_SUSPENDED = 0x00000004
 ERROR_ALREADY_EXISTS = 183
+PROCESS_POWER_THROTTLING = 4  # ProcessPowerThrottling
+PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1
+
+class PROCESS_POWER_THROTTLING_STATE(ctypes.Structure):
+    _fields_ = [
+        ('Version', wintypes.ULONG),
+        ('ControlMask', wintypes.ULONG),
+        ('StateMask', wintypes.ULONG),
+    ]
+
+def keep_at_full_speed(pid):
+    """Tell Windows a process is real work, although it has no window in front.
+
+    Windows 11 treats a process without a foreground window as background
+    work, and on CPUs with performance and efficiency cores (Intel 12th
+    generation and later) runs it on the slow cores. Measured on a 13900KS: a
+    render that spent its time in one CPU thread ran 2.4 times slower that way.
+
+    ControlMask names the behaviour being decided (execution speed) and a
+    StateMask of 0 decides it as "do not throttle".
+    """
+    process = kernel32.OpenProcess(PROCESS_SET_INFORMATION, False, pid)
+    if not process:
+        return  # already gone
+    state = PROCESS_POWER_THROTTLING_STATE(1, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 0)
+    # Best effort: older Windows versions do not know this setting, and nothing depends on it
+    kernel32.SetProcessInformation(process, PROCESS_POWER_THROTTLING, ctypes.byref(state), ctypes.sizeof(state))
+    kernel32.CloseHandle(process)
 
 class IO_COUNTERS(ctypes.Structure):
     _fields_ = [(name, ctypes.c_ulonglong) for name in (
@@ -113,6 +147,13 @@ class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
         ('Affinity', ctypes.c_size_t),
         ('PriorityClass', wintypes.DWORD),
         ('SchedulingClass', wintypes.DWORD),
+    ]
+
+class JOBOBJECT_BASIC_PROCESS_ID_LIST(ctypes.Structure):
+    _fields_ = [
+        ('NumberOfAssignedProcesses', wintypes.DWORD),
+        ('NumberOfProcessIdsInList', wintypes.DWORD),
+        ('ProcessIdList', ctypes.c_size_t * 256),
     ]
 
 class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
@@ -138,6 +179,7 @@ class JobObject:
         self.handle = kernel32.CreateJobObjectW(None, None)
         if not self.handle:
             raise ctypes.WinError(ctypes.get_last_error())
+        self.at_full_speed = set()  # process ids already opted out of throttling
         self._set_limits(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
 
     def _set_limits(self, flags):
@@ -154,11 +196,30 @@ class JobObject:
         try:
             if not kernel32.AssignProcessToJobObject(self.handle, process):
                 raise ctypes.WinError(ctypes.get_last_error())
+            self.keep_at_full_speed()
             status = ntdll.NtResumeProcess(process)
             if status != 0:
                 raise OSError(f"Could not resume process {pid} (NTSTATUS 0x{status & 0xFFFFFFFF:08X})")
         finally:
             kernel32.CloseHandle(process)
+
+    def process_ids(self):
+        info = JOBOBJECT_BASIC_PROCESS_ID_LIST()
+        if not self.handle:
+            return []
+        kernel32.QueryInformationJobObject(self.handle, JOB_OBJECT_BASIC_PROCESS_ID_LIST, ctypes.byref(info), ctypes.sizeof(info), None)
+        return list(info.ProcessIdList[:info.NumberOfProcessIdsInList])
+
+    def keep_at_full_speed(self):
+        """Opt every process in the job out of Windows' background throttling.
+
+        Called again while the render runs: the setting is not inherited, so
+        a husk that hython starts later has to be given it too.
+        """
+        for pid in self.process_ids():
+            if pid not in self.at_full_speed:
+                keep_at_full_speed(pid)
+                self.at_full_speed.add(pid)
 
     def kill(self):
         kernel32.TerminateJobObject(self.handle, 1)
@@ -445,6 +506,7 @@ class Worker:
             # Runs on a timer rather than per log line, so the manager hears
             # from us (and can tell us to stop) even while the render is silent
             while not finished.wait(REPORT_INTERVAL):
+                job.keep_at_full_speed()
                 text, progress = output.take()
                 reply = self.report(task, "running", text, progress, watch.check())
                 if reply is None:

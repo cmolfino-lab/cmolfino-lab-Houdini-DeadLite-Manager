@@ -3,6 +3,7 @@
 Run from the repository root:
     venv\\Scripts\\python -m unittest discover tests -b
 """
+import ctypes
 import os
 import socket
 import subprocess
@@ -101,6 +102,16 @@ def pid_alive(pid):
     out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                          capture_output=True, text=True).stdout
     return f'"{pid}"' in out
+
+
+def throttling_setting(pid):
+    """(ControlMask, StateMask) of a process's power throttling: (1, 0) is "never throttle", (0, 0) leaves it to Windows."""
+    handle = client.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    state = client.PROCESS_POWER_THROTTLING_STATE(1, 0, 0)
+    client.kernel32.GetProcessInformation(ctypes.c_void_p(handle), client.PROCESS_POWER_THROTTLING,
+                                          ctypes.byref(state), ctypes.sizeof(state))
+    client.kernel32.CloseHandle(handle)
+    return state.ControlMask, state.StateMask
 
 
 def wait_for(condition, timeout=15):
@@ -214,6 +225,19 @@ class JobObjectTests(ScriptsMixin, unittest.TestCase):
         job.release()
 
         self.assert_tree_dead(pids)
+
+    def test_every_process_in_the_tree_is_opted_out_of_background_throttling(self):
+        # Windows runs windowless processes on the slow cores of a hybrid CPU
+        # unless told otherwise, and the setting is not passed on to children.
+        job, pids = self.start_tree()
+        self.assertEqual(throttling_setting(pids["CHILD"]), (0, 0), "children do not inherit it")
+
+        job.keep_at_full_speed()  # the worker repeats this while a render runs
+
+        self.assertEqual(throttling_setting(pids["PARENT"]), (1, 0))
+        self.assertEqual(throttling_setting(pids["CHILD"]), (1, 0))
+        job.kill()
+        job.release()
 
     def test_release_leaves_processes_running(self):
         job, pids = self.start_tree()
@@ -542,6 +566,16 @@ class WorkerEndToEndTests(LiveManagerTestCase):
         # and the worker is free for the next task straight away
         self.assertIsNone(self.worker.poll_for_task())
         self.assertEqual(requests.get(f"{self.url}/api/state").json()["workers"]["TEST-PC"]["status"], "idle")
+
+    def test_render_started_by_the_worker_runs_at_full_speed_including_what_it_starts(self):
+        task_id, thread, pids = self.start_tree_task()
+
+        # the child (think: husk started by hython) is picked up on the worker's next report
+        self.assertTrue(wait_for(lambda: throttling_setting(pids["CHILD"]) == (1, 0), timeout=5))
+        self.assertEqual(throttling_setting(pids["PARENT"]), (1, 0))
+
+        requests.post(f"{self.url}/api/tasks/{task_id}/cancel")
+        thread.join(15)
 
     def test_deleting_the_job_kills_the_render_tree(self):
         task_id, thread, pids = self.start_tree_task()
